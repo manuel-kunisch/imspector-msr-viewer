@@ -1,0 +1,15 @@
+# measurement data and exports stay local
+*.msr
+*.obf
+*.tif
+*.tiff
+*_tiff/
+
+# python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# editors
+.vscode/
+.idea/

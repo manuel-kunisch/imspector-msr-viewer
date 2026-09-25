@@ -35,6 +35,16 @@ Video export needs ffmpeg: `pip install imageio-ffmpeg` (bundles it) or any ffmp
 The PSF analysis and the line scan need pyqtgraph; scipy, scikit-image and matplotlib are optional
 (Gaussian fit, spline sampling, sub-pixel alignment, plot export).
 
+## Windows exe
+
+    powershell -ExecutionPolicy Bypass -File build_windows.ps1
+
+builds `dist\MSR_Viewer_v<version>\MSR_Viewer.exe` and a zip of that folder (PyInstaller, one-folder build, no
+Python needed on the target PC). The script creates its own `.venv-build` from Python 3.12 (py launcher) with the
+packages from requirements.txt, so the exe only contains what the viewer imports: about 320 MB unpacked, mostly
+ffmpeg, Qt and scipy. `-SkipInstall` reuses the venv as it is, `-NoZip` skips the zip. Drop .msr files onto the
+exe or use "Open with".
+
 ## Usage
 
 Viewer:

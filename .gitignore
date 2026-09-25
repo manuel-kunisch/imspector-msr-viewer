@@ -10,6 +10,11 @@ __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
 
+# exe build (build_windows.ps1)
+/.venv-build/
+/build/
+/dist/
+
 # editors
 .vscode/
 .idea/

@@ -3,7 +3,7 @@
 Viewer and TIFF exporter for LaVision BioTec **ImSpector** `.msr` files (ImSpector Pro 7.x, TriM Scope).
 Bio-Formats rejects these files ("Unknown file format"), so this reads them directly. No ImSpector needed.
 
-> **v0.2, in development.** Tested so far with ImSpector Pro 7.6.4 files (camera, PMT and resonant
+> **v0.2.1, in development.** Tested so far with ImSpector Pro 7.6.4 files (camera, PMT and resonant
 > scanner timelapse). Other acquisition types may not work yet.
 
 ## Features
@@ -13,6 +13,7 @@ Bio-Formats rejects these files ("Unknown file format"), so this reads them dire
 - Zoom/pan, scale bar, LUTs, histogram/contrast, frame slider and playback with the real frame times
 - All metadata: pixel size, frame timestamps, objective and every ImSpector setting (filter, compare two stacks)
 - Export to OME-TIFF or ImageJ TIFF with physical pixel size and frame times, plus a `metadata.json`
+- Frame times as plain text, one value (s) per line
 - Pixel data is exported bit-exact, no rescaling
 
 ## Install
@@ -34,9 +35,10 @@ Wheel = zoom, drag = pan, double-click = fit, ←/→ = frame, Space = play.
 
 Export without GUI:
 
-    python msr_reader.py file.msr            # OME-TIFFs + metadata.json into file_tiff/
-    python msr_reader.py folder --imagej     # every .msr in a folder, as ImageJ hyperstacks
-    python msr_reader.py file.msr --info     # only list what is inside
+    python msr_reader.py file.msr                # OME-TIFFs, frame times + metadata.json into file_tiff/
+    python msr_reader.py folder --imagej         # every .msr in a folder, as ImageJ hyperstacks
+    python msr_reader.py file.msr --timestamps   # only the frame times as text, one per line
+    python msr_reader.py file.msr --info         # only list what is inside
 
 From Python:
 

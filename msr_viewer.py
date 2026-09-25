@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import msr_reader as mr  # noqa: E402
 
 APP_NAME = "MSR Viewer"
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 
 # -----------------------------------------------------------------------------
@@ -1127,6 +1127,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                 tip="Save the displayed stack as OME-TIFF or ImageJ TIFF")
         self.a_save_png = act("Save view as &PNG…", self.save_png, "Ctrl+Shift+S",
                               tip="Current frame with LUT (and scale bar) at full resolution")
+        self.a_export_ts = act("Export frame &times as text…", self.export_timestamps, "Ctrl+T",
+                               tip="Acquisition time of every frame of the current stack, one value (s) per line")
         self.a_quit = act("&Quit", self.close, QtGui.QKeySequence.Quit)
         self.a_fit = act("&Fit to window", self.view.fit, "F", tip="Fit (F, or double-click the image)")
         self.a_1to1 = act("&Actual pixels", self.view.zoom_1to1, "1", tip="100 %: one image pixel per screen pixel (1)")
@@ -1140,8 +1142,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         mb = self.menuBar()
         m = mb.addMenu("&File")
-        for a in (self.a_open, None, self.a_export, self.a_export_ij, self.a_save_stack, self.a_save_png, None,
-                  self.a_close, self.a_quit):
+        for a in (self.a_open, None, self.a_export, self.a_export_ij, self.a_save_stack, self.a_save_png,
+                  self.a_export_ts, None, self.a_close, self.a_quit):
             m.addSeparator() if a is None else m.addAction(a)
         m = mb.addMenu("&View")
         for a in (self.a_fit, self.a_1to1, self.a_scalebar, None, self.a_play, self.a_prev, self.a_next):
@@ -1167,9 +1169,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def open_paths(self, paths) -> None:
         files = []
         for p in paths:
-            if os.path.isdir(p):
-                files += sorted(os.path.join(p, f) for f in os.listdir(p) if f.lower().endswith(".msr"))
-            elif os.path.isfile(p):
+            if os.path.isdir(mr._fs_path(p)):
+                files += sorted(os.path.join(p, f) for f in os.listdir(mr._fs_path(p))
+                                if f.lower().endswith(".msr"))
+            elif os.path.isfile(mr._fs_path(p)):
                 files.append(p)
         errors, last = [], None
         QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -1378,7 +1381,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _file_sections(msr: mr.MSRFile):
         first = msr.stacks[0] if msr.stacks else None
         rows = [("Path", msr.path),
-                ("Size", f"{os.path.getsize(msr.path) / 1e6:.1f} MB"),
+                ("Size", f"{os.path.getsize(mr._fs_path(msr.path)) / 1e6:.1f} MB"),
                 ("Format version", msr.version),
                 ("Software", first.meta.get("VersionNr") if first else ""),
                 ("Data stacks", len(msr.stacks)),
@@ -1541,6 +1544,32 @@ class MainWindow(QtWidgets.QMainWindow):
             if not img.save(path):
                 QtWidgets.QMessageBox.critical(self, APP_NAME, f"Could not write {path}")
 
+    def export_timestamps(self) -> None:
+        if self.cur_key is None or self.center.currentWidget() is not self.viewer_page:
+            return
+        msr = self.files[self.cur_key[0]]
+        pos = self.cur_key[1]
+        s = msr.stacks[pos]
+        if not s.timestamps:
+            QtWidgets.QMessageBox.information(self, APP_NAME, "This stack has no per-frame times.")
+            return
+        stem = os.path.splitext(os.path.basename(msr.path))[0]
+        name = f"{stem}_S{pos + 1}_{mr._safe(s.channel_id.split(':')[0] or s.source)}_timestamps.txt"
+        start = os.path.join(self.qsettings.value("export_dir", os.path.dirname(msr.path)), name)
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export frame times", start, "Text file (*.txt)")
+        if not path:
+            return
+        if not path.lower().endswith(".txt"):
+            path += ".txt"
+        self.qsettings.setValue("export_dir", os.path.dirname(path))
+        try:
+            n = mr.write_timestamps(s, path)
+        except OSError as exc:
+            QtWidgets.QMessageBox.critical(self, APP_NAME, f"Could not write {path}:\n{exc}")
+            return
+        self.statusBar().showMessage(f"Wrote {n} frame times (s, first frame at {s.timestamps[0]:.6g} s) to "
+                                     f"{os.path.basename(path)}", 8000)
+
     # -- misc -------------------------------------------------------------------------
 
     def _update_actions(self) -> None:
@@ -1556,6 +1585,8 @@ class MainWindow(QtWidgets.QMainWindow):
             a.setEnabled(showing_stack)
         for a in (self.a_play, self.a_prev, self.a_next):
             a.setEnabled(showing_stack and bool(self.frames.rows))
+        has_times = showing_stack and bool(self.files[self.cur_key[0]].stacks[self.cur_key[1]].timestamps)
+        self.a_export_ts.setEnabled(has_times)
         self.busy.setVisible(busy)
 
     def _tree_menu(self, pos) -> None:
@@ -1567,6 +1598,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if item.data(0, Qt.UserRole)[0] == "stack":
             menu.addAction(self.a_save_stack)
             menu.addAction(self.a_save_png)
+            menu.addAction(self.a_export_ts)
             menu.addSeparator()
         menu.addAction(self.a_export)
         menu.addAction(self.a_export_ij)

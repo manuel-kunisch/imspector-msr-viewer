@@ -17,7 +17,7 @@ Pro document (the reverse-engineered layout is described in MSR_FORMAT.md):
 Command line::
 
     python msr_reader.py FILE_OR_FOLDER [...] [-o OUTDIR] [--imagej]
-                         [--group auto|geometry|none] [--compress zlib] [--info]
+                         [--group auto|geometry|none] [--compress zlib] [--timestamps] [--info]
 
 Python::
 
@@ -42,7 +42,7 @@ from typing import Any, Iterator
 
 import numpy as np
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 _U8 = struct.Struct("<B")
 _U16 = struct.Struct("<H")
@@ -83,6 +83,22 @@ _XML_ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 
 def _xml_safe(text: str) -> str:
     return _XML_ILLEGAL.sub("", text)
+
+
+def _fs_path(path: str) -> str:
+    """Path the Win32 API accepts even beyond MAX_PATH (260 characters).
+
+    ImSpector file names are long, so '<name>_tiff/<file>' easily exceeds the
+    limit; the '\\\\?\\' prefix lifts it.
+    """
+    if os.name != "nt":
+        return path
+    p = os.path.abspath(path)
+    if len(p) < 240 or p.startswith("\\\\?\\"):
+        return p
+    if p.startswith("\\\\"):  # UNC path \\server\share\...
+        return "\\\\?\\UNC\\" + p[2:]
+    return "\\\\?\\" + p
 
 
 def _printable(s: str) -> bool:
@@ -397,7 +413,7 @@ class DataStack:
     def asarray(self) -> np.memmap:
         """Pixel data as a read-only memory map with axes :attr:`axes`."""
         full = tuple(int(s) for s in reversed(self.sizes))
-        arr = np.memmap(self.path, dtype=np.dtype(self.dtype).newbyteorder("<"),
+        arr = np.memmap(_fs_path(self.path), dtype=np.dtype(self.dtype).newbyteorder("<"),
                         mode="r", offset=self.data_offset, shape=full)
         return arr.reshape(self.shape)
 
@@ -458,7 +474,7 @@ class MSRFile:
 
     def __init__(self, path):
         self.path = os.fspath(path)
-        self._fh = open(self.path, "rb")
+        self._fh = open(_fs_path(self.path), "rb")
         try:
             self._buf = mmap.mmap(self._fh.fileno(), 0, access=mmap.ACCESS_READ)
         except ValueError:
@@ -1171,7 +1187,7 @@ def export_group(msr: MSRFile, stacks: list[DataStack], path: str, imagej: bool 
         if bigtiff:
             msr._warn(f"{os.path.basename(path)}: > 4 GB, ImageJ cannot open BigTIFF hyperstacks "
                       "(Fiji's Bio-Formats importer can)")
-        tifffile.imwrite(path, _iter_planes(stacks, axes, shape, mapping), imagej=True,
+        tifffile.imwrite(_fs_path(path), _iter_planes(stacks, axes, shape, mapping), imagej=True,
                          metadata=md, **kwargs)
     else:
         md = {"axes": axes, "Name": _xml_safe(f"{os.path.basename(msr.path)} #{first.index} {first.source} {first.time}")}
@@ -1192,20 +1208,37 @@ def export_group(msr: MSRFile, stacks: list[DataStack], path: str, imagej: bool 
                 md["Plane"] = {"DeltaT": deltas, "DeltaTUnit": ["s"] * len(deltas)}
         md["Channel"] = {"Name": names if "C" in axes else names[:1]}
         md["MapAnnotation"] = _annotation(stacks)
-        tifffile.imwrite(path, _iter_planes(stacks, axes, shape, mapping), ome=True,
+        tifffile.imwrite(_fs_path(path), _iter_planes(stacks, axes, shape, mapping), ome=True,
                          metadata=md, **kwargs)
     return {"file": os.path.basename(path), "stacks": [s.index for s in stacks], "channels": names,
             "axes": axes, "shape": shape, "dtype": dtype.name,
             "pixel_size": [px, py], "time_increment": dt if "T" in axes else None}
 
 
+def write_timestamps(stack: DataStack, path: str) -> int:
+    """Write the per-frame acquisition times of *stack* to a text file, one per line.
+
+    Values are seconds exactly as stored by ImSpector (not shifted to start at 0),
+    printed with the shortest decimal form that reproduces the stored float32.
+    """
+    with open(_fs_path(path), "w", encoding="ascii", newline="\n") as fh:
+        for t in stack.timestamps:
+            fh.write(np.format_float_positional(np.float32(t), unique=True, trim="-") + "\n")
+    return len(stack.timestamps)
+
+
 def export(path: str, outdir: str | None = None, imagej: bool = False, group: str = "auto",
-           compression: str | None = None, log=print) -> list[dict]:
-    """Convert one .msr file; returns a description of the written files."""
+           compression: str | None = None, log=print, timestamps_only: bool = False) -> list[dict]:
+    """Convert one .msr file; returns a description of the written files.
+
+    Stacks with per-frame times also get a '<name>_timestamps.txt'. With
+    *timestamps_only* only those text files are written.
+    """
     with MSRFile(path) as msr:
         stem = os.path.splitext(os.path.basename(path))[0]
         folder = os.path.join(outdir or os.path.dirname(os.path.abspath(path)), f"{stem}_tiff")
-        os.makedirs(folder, exist_ok=True)
+        if not timestamps_only:
+            os.makedirs(_fs_path(folder), exist_ok=True)
         log(msr.summary())
         groups, notes = group_stacks(msr.stacks, group)
         for note in notes:
@@ -1219,20 +1252,37 @@ def export(path: str, outdir: str | None = None, imagej: bool = False, group: st
             else:
                 parts = [f"S{gi:02d}", _safe(s.channel_id.split(":")[0] or s.source),
                          _safe(s.time.replace(":", ""))]
-            out = os.path.join(folder, "_".join(parts) + ext)
-            try:
-                rec = export_group(msr, members, out, imagej=imagej, compression=compression)
-            except (ValueError, OSError) as exc:
-                msr._warn(f"could not write {os.path.basename(out)}: {exc}")
-                log(f"  ERROR {os.path.basename(out)}: {exc}")
-                continue
-            written.append(rec)
-            log(f"  -> {rec['file']}  axes={rec['axes']} shape={'x'.join(map(str, rec['shape']))} "
-                f"channels={', '.join(rec['channels'])}")
+            base = os.path.join(folder, "_".join(parts))
+            rec = None
+            if not timestamps_only:
+                out = base + ext
+                try:
+                    rec = export_group(msr, members, out, imagej=imagej, compression=compression)
+                except (ValueError, OSError) as exc:
+                    msr._warn(f"could not write {os.path.basename(out)}: {exc}")
+                    log(f"  ERROR {os.path.basename(out)}: {exc}")
+                    continue
+                written.append(rec)
+                log(f"  -> {rec['file']}  axes={rec['axes']} shape={'x'.join(map(str, rec['shape']))} "
+                    f"channels={', '.join(rec['channels'])}")
+            if s.timestamps:
+                os.makedirs(_fs_path(folder), exist_ok=True)
+                ts_file = base + "_timestamps.txt"
+                n = write_timestamps(s, ts_file)
+                log(f"  -> {os.path.basename(ts_file)}  ({n} frame times in s)")
+                if rec is not None:
+                    rec["timestamps_file"] = os.path.basename(ts_file)
+                else:
+                    written.append({"file": os.path.basename(ts_file), "stacks": [m.index for m in members],
+                                    "frames": n})
+        if timestamps_only:
+            if not written:
+                log("  (no stack in this file has per-frame times)")
+            return written
         meta = msr.to_dict()
         meta["exports"] = written
         meta["grouping_notes"] = notes
-        with open(os.path.join(folder, "metadata.json"), "w", encoding="utf-8") as fh:
+        with open(_fs_path(os.path.join(folder, "metadata.json")), "w", encoding="utf-8") as fh:
             json.dump(meta, fh, indent=1, ensure_ascii=False, default=_json_default)
         log(f"  -> metadata.json ({len(msr.properties)} global settings, "
             f"{sum(len(s.properties) for s in msr.stacks)} per-stack settings)")
@@ -1252,8 +1302,8 @@ def _json_default(o):
 def _collect(inputs: list[str]) -> list[str]:
     files = []
     for p in inputs:
-        if os.path.isdir(p):
-            files += sorted(os.path.join(p, f) for f in os.listdir(p) if f.lower().endswith(".msr"))
+        if os.path.isdir(_fs_path(p)):
+            files += sorted(os.path.join(p, f) for f in os.listdir(_fs_path(p)) if f.lower().endswith(".msr"))
         else:
             files.append(p)
     return files
@@ -1274,6 +1324,8 @@ def main(argv=None) -> int:
                     "'none' writes one file per stack")
     ap.add_argument("--compress", choices=["zlib", "lzw", "zstd"], default=None,
                     help="lossless compression (default: none)")
+    ap.add_argument("--timestamps", action="store_true",
+                    help="only write the per-frame times as text (one value in s per line), no TIFFs")
     ap.add_argument("--info", action="store_true", help="only print the file contents")
     args = ap.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
@@ -1291,7 +1343,7 @@ def main(argv=None) -> int:
                     print(msr.summary())
             else:
                 export(f, args.outdir, imagej=args.imagej, group=args.group,
-                       compression=args.compress)
+                       compression=args.compress, timestamps_only=args.timestamps)
         except (MSRFormatError, OSError) as exc:
             failed += 1
             print(f"{f}: {exc}", file=sys.stderr)

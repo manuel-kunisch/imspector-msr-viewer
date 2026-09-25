@@ -36,7 +36,7 @@ from msr_widgets import (COLOR_TABLES, LUTS, ElidedLabel, ImageView, IntensityMa
                          numpy_to_qimage, paint_overlays, render_rgb, rgb_to_qimage)
 
 APP_NAME = "MSR Viewer"
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 
 # -----------------------------------------------------------------------------

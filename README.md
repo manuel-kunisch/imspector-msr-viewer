@@ -3,7 +3,7 @@
 Viewer and TIFF exporter for LaVision BioTec **ImSpector** `.msr` files (ImSpector Pro 7.x, TriM Scope).
 Bio-Formats rejects these files ("Unknown file format"), so this reads them directly. No ImSpector needed.
 
-> **v0.3.0, in development.** Tested so far with ImSpector Pro 7.6.4 files (camera, PMT and resonant
+> **v0.3.1, in development.** Tested so far with ImSpector Pro 7.6.4 files (camera, PMT and resonant
 > scanner timelapse). Other acquisition types may not work yet.
 
 ## Features

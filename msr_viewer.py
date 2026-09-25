@@ -129,26 +129,8 @@ def _shape_text(s: mr.DataStack) -> str:
 
 
 def _app_icon() -> QtGui.QIcon:
-    pix = QtGui.QPixmap(64, 64)
-    pix.fill(Qt.transparent)
-    p = QtGui.QPainter(pix)
-    p.setRenderHint(QtGui.QPainter.Antialiasing)
-    p.setBrush(QtGui.QColor(32, 36, 44))
-    p.setPen(Qt.NoPen)
-    p.drawRoundedRect(QtCore.QRectF(2, 2, 60, 60), 12, 12)
-    grad = QtGui.QRadialGradient(32, 28, 22)
-    grad.setColorAt(0, QtGui.QColor(160, 255, 160))
-    grad.setColorAt(1, QtGui.QColor(20, 140, 60))
-    p.setBrush(grad)
-    p.drawEllipse(QtCore.QPointF(32, 27), 17, 17)
-    font = QtGui.QFont()
-    font.setPixelSize(15)
-    font.setBold(True)
-    p.setFont(font)
-    p.setPen(QtGui.QColor(235, 235, 235))
-    p.drawText(QtCore.QRectF(0, 42, 64, 20), Qt.AlignCenter, "MSR")
-    p.end()
-    return QtGui.QIcon(pix)
+    """Window and taskbar icon, 16-256 px; the same file is the exe icon (msr_viewer.spec)."""
+    return QtGui.QIcon(os.path.join(os.path.dirname(os.path.abspath(__file__)), "msr_viewer.ico"))
 
 
 # -----------------------------------------------------------------------------

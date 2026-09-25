@@ -12,6 +12,8 @@ datas = []
 datas += collect_data_files("pyqtgraph")
 # ffmpeg for the video export; imageio_ffmpeg looks for it in its own package folder
 datas += collect_data_files("imageio_ffmpeg", subdir="binaries")
+# window / taskbar icon, loaded next to msr_viewer.py (the exe icon is set in EXE below)
+datas += [(str(project_root / "msr_viewer.ico"), ".")]
 
 excludes = [
     "tkinter",

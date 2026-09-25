@@ -7,6 +7,9 @@ msr_viewer.py -- drag & drop viewer for LaVision BioTec ImSpector (.msr) files.
 Drop .msr files or folders onto the window (or onto MSR_Viewer.bat in Explorer).
 Parsing and TIFF export are done by msr_reader.py, which must sit next to this file.
 
+Playback runs in real time (recorded frame intervals x speed) or at a fixed frame
+rate; File > Export video writes the same as MP4 (msr_video.py).
+
 Mouse: wheel = zoom, drag = pan, double-click = fit.
 Keys:  Left/Right = previous/next frame, Home/End = first/last frame, Space = play
        (while the image has focus); F = fit, 1 = 100 %, B = scale bar.
@@ -27,47 +30,12 @@ from PyQt5.QtCore import Qt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import msr_reader as mr  # noqa: E402
+import msr_video as mv  # noqa: E402
+from msr_widgets import (COLOR_TABLES, LUTS, ElidedLabel, ImageView, IntensityMapper,  # noqa: E402
+                         numpy_to_qimage, paint_overlays, render_rgb, rgb_to_qimage)
 
 APP_NAME = "MSR Viewer"
 __version__ = "0.2.1"
-
-
-# -----------------------------------------------------------------------------
-# lookup tables
-# -----------------------------------------------------------------------------
-
-def _ramp_lut(r: int, g: int, b: int) -> np.ndarray:
-    x = np.arange(256, dtype=np.float64) / 255.0
-    return np.stack([x * r, x * g, x * b], 1).round().astype(np.uint8)
-
-
-def _anchor_lut(anchors) -> np.ndarray:
-    pos = np.array([a[0] for a in anchors], dtype=np.float64)
-    rgb = np.array([a[1:] for a in anchors], dtype=np.float64)
-    x = np.linspace(0.0, 1.0, 256)
-    return np.stack([np.interp(x, pos, rgb[:, i]) for i in range(3)], 1).round().astype(np.uint8)
-
-
-LUTS = {
-    "Gray": _ramp_lut(255, 255, 255),
-    "Green": _ramp_lut(0, 255, 0),
-    "Magenta": _ramp_lut(255, 0, 255),
-    "Red": _ramp_lut(255, 0, 0),
-    "Cyan": _ramp_lut(0, 255, 255),
-    "Yellow": _ramp_lut(255, 255, 0),
-    "Fire": _anchor_lut([(0, 0, 0, 0), (0.15, 30, 0, 130), (0.3, 100, 0, 220), (0.45, 175, 0, 150),
-                         (0.6, 230, 50, 30), (0.75, 255, 140, 0), (0.9, 255, 230, 60), (1, 255, 255, 255)]),
-    "Viridis": _anchor_lut([(0, 68, 1, 84), (0.125, 71, 44, 122), (0.25, 59, 81, 139),
-                            (0.375, 44, 113, 142), (0.5, 33, 144, 141), (0.625, 39, 173, 129),
-                            (0.75, 92, 200, 99), (0.875, 170, 220, 50), (1, 253, 231, 37)]),
-    "Inverted": _ramp_lut(255, 255, 255)[::-1].copy(),
-}
-_hilo = LUTS["Gray"].copy()
-_hilo[0] = (0, 0, 255)      # at or below min: blue
-_hilo[255] = (255, 0, 0)    # at or above max: red
-LUTS["HiLo"] = _hilo
-COLOR_TABLES = {name: [0xFF000000 | (int(r) << 16) | (int(g) << 8) | int(b) for r, g, b in lut]
-                for name, lut in LUTS.items()}
 
 
 # -----------------------------------------------------------------------------
@@ -82,67 +50,6 @@ def _fmt_value(v) -> str:
 
 def _specified(v) -> bool:
     return v not in (None, "", "not specified", "not_specified")
-
-
-def _nice_length(x: float) -> float:
-    if not x or x <= 0 or not math.isfinite(x):
-        return 0.0
-    e = math.floor(math.log10(x))
-    candidates = [c * 10.0 ** k for k in (e - 1, e, e + 1) for c in (1, 2, 5)]
-    return min(candidates, key=lambda c: abs(math.log(c / x)))
-
-
-def _fmt_length(v: float, unit: str) -> str:
-    if unit in ("µm", "um"):
-        if v >= 1000:
-            return f"{v / 1000:g} mm"
-        if v < 1:
-            return f"{v * 1000:g} nm"
-        return f"{v:g} µm"
-    return f"{v:g} {unit}"
-
-
-def paint_scalebar(p: QtGui.QPainter, width: float, height: float, per_px: float, unit: str,
-                   font_px: int = 12, bar_h: float = 5, margin: float = 18, target: float = 0.18) -> None:
-    """Scale bar in the bottom-left corner of a width x height pixel area."""
-    if not per_px or per_px <= 0:
-        return
-    length = _nice_length(target * width * per_px)
-    px = length / per_px
-    if px < 4:
-        return
-    font = QtGui.QFont(p.font())
-    font.setPixelSize(font_px)
-    font.setBold(True)
-    fm = QtGui.QFontMetrics(font)
-    text = _fmt_length(length, unit)
-    tw, th = fm.horizontalAdvance(text), fm.height()
-    y_bar = height - margin - bar_h
-    box = QtCore.QRectF(margin - 6, y_bar - th - 8, max(px, tw) + 12, th + bar_h + 14)
-    p.save()
-    p.setRenderHint(QtGui.QPainter.Antialiasing)
-    p.setPen(Qt.NoPen)
-    p.setBrush(QtGui.QColor(0, 0, 0, 140))
-    p.drawRoundedRect(box, 4, 4)
-    p.setBrush(QtGui.QColor(255, 255, 255))
-    p.drawRect(QtCore.QRectF(margin, y_bar, px, bar_h))
-    p.setPen(QtGui.QColor(255, 255, 255))
-    p.setFont(font)
-    p.drawText(QtCore.QRectF(margin, y_bar - th - 4, max(px, tw) + 2, th), Qt.AlignLeft | Qt.AlignVCenter, text)
-    p.restore()
-
-
-def _numpy_to_qimage(a8: np.ndarray, colors) -> QtGui.QImage:
-    """8-bit array -> indexed QImage (copied, so the array may be freed)."""
-    h, w = a8.shape
-    if w % 4:
-        padded = np.zeros((h, (w + 3) // 4 * 4), np.uint8)
-        padded[:, :w] = a8
-        a8 = padded
-    a8 = np.ascontiguousarray(a8)
-    img = QtGui.QImage(a8.data, w, h, a8.strides[0], QtGui.QImage.Format_Indexed8)
-    img.setColorTable(colors)
-    return img.copy()
 
 
 def _histogram(frame: np.ndarray, x0: float, x1: float, bins: int = 256):
@@ -208,7 +115,7 @@ def _thumbnail(stack: mr.DataStack, size: int = 200) -> QtGui.QPixmap:
     f = frame[::step, ::step].astype(np.float32)
     lo, hi = _percentiles(f)
     a8 = np.clip((f - lo) * (255.0 / (hi - lo)) + 0.5, 0, 255).astype(np.uint8)
-    pix = QtGui.QPixmap.fromImage(_numpy_to_qimage(a8, COLOR_TABLES["Gray"]))
+    pix = QtGui.QPixmap.fromImage(numpy_to_qimage(a8, COLOR_TABLES["Gray"]))
     return pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
 
@@ -246,139 +153,6 @@ def _app_icon() -> QtGui.QIcon:
 # -----------------------------------------------------------------------------
 # widgets
 # -----------------------------------------------------------------------------
-
-class ElidedLabel(QtWidgets.QLabel):
-    """Single-line label that shortens its text instead of widening the window."""
-
-    def __init__(self, text: str = "", mode=Qt.ElideRight, parent=None):
-        super().__init__(text, parent)
-        self._mode = mode
-        self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
-        self.setMinimumWidth(0)
-
-    def paintEvent(self, ev) -> None:
-        p = QtGui.QPainter(self)
-        p.setPen(self.palette().color(QtGui.QPalette.WindowText))
-        r = self.contentsRect()
-        p.drawText(r, int(Qt.AlignLeft | Qt.AlignVCenter), self.fontMetrics().elidedText(self.text(), self._mode, r.width()))
-
-
-class ImageView(QtWidgets.QGraphicsView):
-    """Zoomable image with a scale bar overlay."""
-
-    mouseMoved = QtCore.pyqtSignal(float, float)
-    mouseLeft = QtCore.pyqtSignal()
-    zoomChanged = QtCore.pyqtSignal(float)
-    stepRequested = QtCore.pyqtSignal(int)
-    jumpRequested = QtCore.pyqtSignal(int)
-    playRequested = QtCore.pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._scene = QtWidgets.QGraphicsScene(self)
-        self.setScene(self._scene)
-        self._item = QtWidgets.QGraphicsPixmapItem()
-        self._scene.addItem(self._item)
-        self._has_image = False
-        self._fit_mode = True
-        self.pixel_size: float | None = None
-        self.unit = "µm"
-        self.show_scalebar = True
-        self.setDragMode(QtWidgets.QGraphicsView.ScrollHandDrag)
-        self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
-        self.setResizeAnchor(QtWidgets.QGraphicsView.AnchorViewCenter)
-        self.setViewportUpdateMode(QtWidgets.QGraphicsView.FullViewportUpdate)
-        self.setBackgroundBrush(QtGui.QColor(16, 16, 16))
-        self.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.setFocusPolicy(Qt.StrongFocus)
-        self.setMouseTracking(True)
-
-    def set_pixmap(self, pix: QtGui.QPixmap, reset: bool) -> None:
-        self._item.setPixmap(pix)
-        if reset or not self._has_image:
-            self._scene.setSceneRect(QtCore.QRectF(0, 0, pix.width(), pix.height()))
-            self._has_image = True
-            self.fit()
-        else:
-            self.viewport().update()
-
-    def clear(self) -> None:
-        self._item.setPixmap(QtGui.QPixmap())
-        self._has_image = False
-
-    def zoom(self) -> float:
-        """Screen pixels per image pixel."""
-        return self.transform().m11() * self.devicePixelRatioF()
-
-    def fit(self) -> None:
-        if not self._has_image:
-            return
-        self._fit_mode = True
-        self.fitInView(self._item, Qt.KeepAspectRatio)
-        self._zoomed()
-
-    def zoom_1to1(self) -> None:
-        if not self._has_image:
-            return
-        self._fit_mode = False
-        s = 1.0 / self.devicePixelRatioF()
-        self.setTransform(QtGui.QTransform.fromScale(s, s))
-        self._zoomed()
-
-    def _zoomed(self) -> None:
-        z = self.zoom()
-        self._item.setTransformationMode(Qt.FastTransformation if z >= 1 else Qt.SmoothTransformation)
-        self.zoomChanged.emit(z)
-        self.viewport().update()
-
-    def wheelEvent(self, ev: QtGui.QWheelEvent) -> None:
-        if not self._has_image:
-            return
-        factor = 1.25 ** (ev.angleDelta().y() / 120.0)
-        cur = self.transform().m11()
-        new = min(max(cur * factor, 0.01), 64.0 / self.devicePixelRatioF())
-        self.scale(new / cur, new / cur)
-        self._fit_mode = False
-        self._zoomed()
-
-    def resizeEvent(self, ev) -> None:
-        super().resizeEvent(ev)
-        if self._fit_mode:
-            self.fit()
-
-    def mouseDoubleClickEvent(self, ev) -> None:
-        self.fit()
-
-    def mouseMoveEvent(self, ev) -> None:
-        super().mouseMoveEvent(ev)
-        if self._has_image:
-            p = self.mapToScene(ev.pos())
-            self.mouseMoved.emit(p.x(), p.y())
-
-    def leaveEvent(self, ev) -> None:
-        self.mouseLeft.emit()
-        super().leaveEvent(ev)
-
-    def keyPressEvent(self, ev) -> None:
-        k = ev.key()
-        if k in (Qt.Key_Left, Qt.Key_Right):
-            self.stepRequested.emit(-1 if k == Qt.Key_Left else 1)
-        elif k in (Qt.Key_Home, Qt.Key_End):
-            self.jumpRequested.emit(0 if k == Qt.Key_Home else -1)
-        elif k == Qt.Key_Space:
-            self.playRequested.emit()
-        else:
-            super().keyPressEvent(ev)
-
-    def drawForeground(self, painter: QtGui.QPainter, rect) -> None:
-        if not (self._has_image and self.show_scalebar and self.pixel_size):
-            return
-        painter.save()
-        painter.resetTransform()
-        vp = self.viewport().rect()
-        paint_scalebar(painter, vp.width(), vp.height(), self.pixel_size / self.transform().m11(), self.unit)
-        painter.restore()
-
 
 class HistogramWidget(QtWidgets.QWidget):
     """Log histogram with draggable min/max handles and the LUT underneath."""
@@ -503,7 +277,7 @@ class DisplayPanel(QtWidgets.QWidget):
         form = QtWidgets.QFormLayout()
         self.lut = QtWidgets.QComboBox()
         for name in LUTS:
-            icon = QtGui.QPixmap.fromImage(_numpy_to_qimage(np.tile(np.arange(256, dtype=np.uint8), (12, 1)),
+            icon = QtGui.QPixmap.fromImage(numpy_to_qimage(np.tile(np.arange(256, dtype=np.uint8), (12, 1)),
                                                             COLOR_TABLES[name])).scaled(64, 12)
             self.lut.addItem(QtGui.QIcon(icon), name)
         self.lut.setIconSize(QtCore.QSize(64, 12))
@@ -762,7 +536,13 @@ class SettingsPanel(QtWidgets.QWidget):
 
 
 class FrameControls(QtWidgets.QWidget):
-    """One slider per non-image axis (T, Z, ...), with playback on T."""
+    """One slider per non-image axis (T, Z, ...), with playback on T.
+
+    Playback runs at a fixed frame rate or in real time: every frame stays on
+    screen for its actual acquisition interval (per-frame time stamps), scaled
+    by a speed factor.  Real time follows the wall clock, so frames are skipped
+    when drawing cannot keep up instead of the movie slowing down.
+    """
 
     indexChanged = QtCore.pyqtSignal()
 
@@ -777,30 +557,54 @@ class FrameControls(QtWidgets.QWidget):
         self.play_row = 0
         self.timer = QtCore.QTimer(self)
         self.timer.setTimerType(Qt.PreciseTimer)
-        self.timer.timeout.connect(lambda: self.step(1))
+        self.timer.timeout.connect(self._tick)
+        self.clock = QtCore.QElapsedTimer()
+        self._times: np.ndarray | None = None  # acquisition time of each frame on the play axis
+        self._anchor = 0.0                      # data time at clock start
+        self._ticking = False                   # slider moved by playback, not by the user
+        self._preferred_mode = 0                # what the user picked (0 real time, 1 fixed fps)
+        self._configuring = False
         self.play_btn = QtWidgets.QPushButton()
         self.play_btn.setMinimumWidth(84)
         self.play_btn.setToolTip("Play / pause (Space)")
         self.play_btn.clicked.connect(self.toggle_play)
+        self.mode = QtWidgets.QComboBox()
+        self.mode.addItems(["real time", "fixed fps"])
+        self.mode.setToolTip("Real time: frames are held for their actual acquisition interval (× speed)\n"
+                             "Fixed fps: one frame per tick")
+        self.mode.currentIndexChanged.connect(self._mode_changed)
         self.fps = QtWidgets.QSpinBox()
         self.fps.setRange(1, 240)
         self.fps.setSuffix(" fps")
-        self.fps.setToolTip("Playback speed (defaults to the real acquisition rate, max. 60)")
-        self.fps.valueChanged.connect(lambda v: self.timer.setInterval(max(1, round(1000 / v))))
+        self.fps.setToolTip("Frames per second in fixed-fps mode")
+        self.fps.valueChanged.connect(self._restart_if_playing)
+        self.speed = QtWidgets.QDoubleSpinBox()
+        self.speed.setRange(0.01, 100.0)
+        self.speed.setDecimals(2)
+        self.speed.setSingleStep(0.25)
+        self.speed.setValue(1.0)
+        self.speed.setSuffix(" ×")
+        self.speed.setToolTip("Speed in real-time mode: 1 = as recorded, 0.25 = four times slower")
+        self.speed.valueChanged.connect(self._restart_if_playing)
         self.hide()
 
     @property
     def playing(self) -> bool:
         return self.timer.isActive()
 
+    @property
+    def real_time(self) -> bool:
+        return self.mode.currentIndex() == 0 and self._times is not None
+
     def configure(self, stack: mr.DataStack, axes: str, shape: tuple) -> None:
         self.stop()
         for r in self.rows:
             for w in (r["label"], r["slider"], r["spin"], r["info"]):
                 self.grid.removeWidget(w)
+                w.hide()  # deleteLater only acts once control returns to the event loop
                 w.deleteLater()
-        self.grid.removeWidget(self.play_btn)
-        self.grid.removeWidget(self.fps)
+        for w in (self.play_btn, self.mode, self.fps, self.speed):
+            self.grid.removeWidget(w)
         self.rows, self.stack = [], stack
         for i, (letter, n) in enumerate(zip(axes, shape)):
             label = QtWidgets.QLabel(f"<b>{letter}</b>")
@@ -820,12 +624,22 @@ class FrameControls(QtWidgets.QWidget):
                     x.setAcceptDrops(False)  # let file drops reach the main window
             self.rows.append({"letter": letter, "n": n, "label": label, "slider": slider, "spin": spin,
                               "info": info})
+        self._times = None
         if self.rows:
             self.play_row = next((i for i, r in enumerate(self.rows) if r["letter"] == "T"), 0)
-            self.grid.addWidget(self.play_btn, self.play_row, 4)
-            self.grid.addWidget(self.fps, self.play_row, 5)
-            dt = stack.time_increment if self.rows[self.play_row]["letter"] == "T" else None
+            row = self.rows[self.play_row]
+            self._times = mv.frame_times(stack, row["letter"], row["n"])
+            for col, w in enumerate((self.play_btn, self.mode, self.fps, self.speed), start=4):
+                self.grid.addWidget(w, self.play_row, min(col, 6))
+            dt = mv.typical_interval(self._times) if self._times is not None else None
+            self.fps.blockSignals(True)
             self.fps.setValue(int(min(60, max(1, round(1.0 / dt)))) if dt else 10)
+            self.fps.blockSignals(False)
+            self._configuring = True
+            self.mode.setEnabled(self._times is not None)
+            self.mode.setCurrentIndex(self._preferred_mode if self._times is not None else 1)
+            self._configuring = False
+        self._mode_widgets()
         self._set_icon()
         self._update_info()
         self.setVisible(bool(self.rows))
@@ -839,6 +653,8 @@ class FrameControls(QtWidgets.QWidget):
         spin.setValue(v + 1)
         spin.blockSignals(False)
         self._update_info(i)
+        if self.playing and self.real_time and i == self.play_row and not self._ticking:
+            self._reanchor()  # the user moved the slider during playback
         self.indexChanged.emit()
 
     def step(self, delta: int) -> None:
@@ -857,12 +673,59 @@ class FrameControls(QtWidgets.QWidget):
         if self.timer.isActive():
             self.stop()
         else:
+            self._start()
+
+    def _start(self) -> None:
+        if self.real_time:
+            self._reanchor()
+            dt = (mv.typical_interval(self._times) or 0.05) / self.speed.value()
+            self.timer.start(int(max(2, min(20, dt * 1000 / 4))))  # poll a few times per frame
+        else:
             self.timer.start(max(1, round(1000 / self.fps.value())))
-            self._set_icon()
+        self._set_icon()
 
     def stop(self) -> None:
         self.timer.stop()
         self._set_icon()
+
+    def _restart_if_playing(self, *_) -> None:
+        if self.playing:
+            self.timer.stop()
+            self._start()
+
+    def _mode_changed(self, *_) -> None:
+        if not self._configuring:
+            self._preferred_mode = self.mode.currentIndex()
+        self._mode_widgets()
+        self._restart_if_playing()
+
+    def _mode_widgets(self) -> None:
+        real = self.mode.currentIndex() == 0 and self._times is not None
+        self.speed.setVisible(real and bool(self.rows))
+        self.fps.setVisible(not real and bool(self.rows))
+
+    def _reanchor(self) -> None:
+        r = self.rows[self.play_row]
+        self._anchor = float(self._times[r["slider"].value()])
+        self.clock.start()
+
+    def _tick(self) -> None:
+        if not self.real_time:
+            self.step(1)
+            return
+        r = self.rows[self.play_row]
+        ts = self._times
+        t = self._anchor + self.clock.elapsed() / 1000.0 * self.speed.value()
+        if t >= ts[-1] + (mv.typical_interval(ts) or 0.0):  # past the last frame: loop
+            self._anchor = float(ts[0])
+            self.clock.start()
+            i = 0
+        else:
+            i = max(0, int(np.searchsorted(ts, t, side="right")) - 1)
+        if i != r["slider"].value():
+            self._ticking = True
+            r["slider"].setValue(i)
+            self._ticking = False
 
     def _set_icon(self) -> None:
         self.play_btn.setText("❚❚  Pause" if self.timer.isActive() else "▶  Play")
@@ -1019,8 +882,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cur_key: tuple | None = None
         self.arr = None
         self.frame: np.ndarray | None = None
-        self._map_key = None
-        self._map_lut = None
+        self.mapper = IntensityMapper()
         self._hist_skip = 0
         self.tasks: set[Task] = set()
         self._build_ui()
@@ -1129,6 +991,8 @@ class MainWindow(QtWidgets.QMainWindow):
                               tip="Current frame with LUT (and scale bar) at full resolution")
         self.a_export_ts = act("Export frame &times as text…", self.export_timestamps, "Ctrl+T",
                                tip="Acquisition time of every frame of the current stack, one value (s) per line")
+        self.a_video = act("Export &video (MP4)…", self.export_video, "Ctrl+Shift+V",
+                           tip="Timelapse or z sweep as MP4: real acquisition timing (× speed) or a fixed frame rate")
         self.a_quit = act("&Quit", self.close, QtGui.QKeySequence.Quit)
         self.a_fit = act("&Fit to window", self.view.fit, "F", tip="Fit (F, or double-click the image)")
         self.a_1to1 = act("&Actual pixels", self.view.zoom_1to1, "1", tip="100 %: one image pixel per screen pixel (1)")
@@ -1143,7 +1007,7 @@ class MainWindow(QtWidgets.QMainWindow):
         mb = self.menuBar()
         m = mb.addMenu("&File")
         for a in (self.a_open, None, self.a_export, self.a_export_ij, self.a_save_stack, self.a_save_png,
-                  self.a_export_ts, None, self.a_close, self.a_quit):
+                  self.a_video, self.a_export_ts, None, self.a_close, self.a_quit):
             m.addSeparator() if a is None else m.addAction(a)
         m = mb.addMenu("&View")
         for a in (self.a_fit, self.a_1to1, self.a_scalebar, None, self.a_play, self.a_prev, self.a_next):
@@ -1154,7 +1018,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tb.setObjectName("main_toolbar")
         tb.setMovable(False)
         tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        for a in (self.a_open, self.a_export, None, self.a_fit, self.a_1to1, self.a_scalebar):
+        for a in (self.a_open, self.a_export, self.a_video, None, self.a_fit, self.a_1to1, self.a_scalebar):
             tb.addSeparator() if a is None else tb.addAction(a)
 
     # -- file handling -------------------------------------------------------------
@@ -1316,24 +1180,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # -- rendering ------------------------------------------------------------------
 
-    def _map8(self, frame: np.ndarray, lo: float, hi: float) -> np.ndarray:
-        scale = 255.0 / max(hi - lo, 1e-12)
-        if frame.dtype in (np.uint8, np.uint16):
-            key = (frame.dtype.str, lo, hi)
-            if self._map_key != key:
-                x = np.arange(256 if frame.dtype == np.uint8 else 65536, dtype=np.float32)
-                self._map_lut = np.clip((x - lo) * scale + 0.5, 0, 255).astype(np.uint8)
-                self._map_key = key
-            return self._map_lut[frame]
-        return np.clip((frame.astype(np.float32) - lo) * scale + 0.5, 0, 255).astype(np.uint8)
-
     def _render_frame(self, reset: bool = False, histogram: bool = True) -> None:
         if self.arr is None or self.cur_key is None:
             return
         idx = self.frames.index()
         self.frame = np.asarray(self.arr[idx] if idx else self.arr)
         st = self.states[self.cur_key]
-        img = _numpy_to_qimage(self._map8(self.frame, st.lo, st.hi), COLOR_TABLES[st.lut])
+        img = numpy_to_qimage(self.mapper.map(self.frame, st.lo, st.hi), COLOR_TABLES[st.lut])
         self.view.set_pixmap(QtGui.QPixmap.fromImage(img), reset)
         if histogram:
             if self.frames.playing and self._hist_skip > 0:
@@ -1524,15 +1377,8 @@ class MainWindow(QtWidgets.QMainWindow):
         pos = self.cur_key[1]
         s = msr.stacks[pos]
         st = self.states[self.cur_key]
-        rgb = np.ascontiguousarray(LUTS[st.lut][self._map8(self.frame, st.lo, st.hi)])
-        h, w = self.frame.shape
-        img = QtGui.QImage(rgb.data, w, h, 3 * w, QtGui.QImage.Format_RGB888).convertToFormat(QtGui.QImage.Format_RGB32)
-        px = s.pixel_size[0]
-        if self.view.show_scalebar and px:
-            p = QtGui.QPainter(img)
-            paint_scalebar(p, w, h, px, self.view.unit, font_px=max(12, h // 28), bar_h=max(3, h // 110),
-                           margin=max(8, w // 40))
-            p.end()
+        img = rgb_to_qimage(render_rgb(self.frame, st.lo, st.hi, st.lut, self.mapper))
+        img = paint_overlays(img, s.pixel_size[0], self.view.unit, self.view.show_scalebar)
         stem = os.path.splitext(os.path.basename(msr.path))[0]
         frame_txt = "_".join(f"{a}{i + 1}" for a, i in zip(s.axes[:-2], self.frames.index()))
         name = f"{stem}_S{pos + 1}{'_' + frame_txt if frame_txt else ''}.png"
@@ -1570,6 +1416,64 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Wrote {n} frame times (s, first frame at {s.timestamps[0]:.6g} s) to "
                                      f"{os.path.basename(path)}", 8000)
 
+    def export_video(self) -> None:
+        if self.cur_key is None or self.center.currentWidget() is not self.viewer_page or not self.frames.rows:
+            return
+        msr = self.files[self.cur_key[0]]
+        pos = self.cur_key[1]
+        s = msr.stacks[pos]
+        st = self.states[self.cur_key]
+        self.frames.stop()
+        stem = os.path.splitext(os.path.basename(msr.path))[0]
+        defaults = {
+            "real_time": self.frames.mode.currentIndex() == 0, "speed": self.frames.speed.value(),
+            "fps": self.frames.fps.value(), "out_fps": int(self.qsettings.value("video_out_fps", 60)),
+            "scalebar": self.view.show_scalebar, "lut": st.lut, "lo": st.lo, "hi": st.hi,
+            "stem": f"{stem}_S{pos + 1}_{mr._safe(s.channel_id.split(':')[0] or s.source)}",
+            "folder": self.qsettings.value("export_dir", os.path.dirname(msr.path)),
+        }
+        dlg = mv.VideoExportDialog(s, self.arr.shape[:-2], self.frames.index(), self.frames.play_row, defaults, self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        settings = dlg.settings()
+        self.qsettings.setValue("export_dir", os.path.dirname(settings.path))
+        self.qsettings.setValue("video_out_fps", int(settings.out_fps))
+        self._start_video_export(s, self.frames.index(), settings)
+
+    def _start_video_export(self, s: mr.DataStack, index: tuple, settings: mv.VideoSettings) -> mv.VideoExportThread:
+        thread = mv.VideoExportThread(s, index, settings, self)
+        progress = QtWidgets.QProgressDialog(f"Writing {os.path.basename(settings.path)}…", "Cancel", 0, 1, self)
+        progress.setWindowTitle("Export video")
+        progress.setWindowModality(Qt.NonModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.canceled.connect(thread.cancel)
+        thread.progress.connect(lambda k, n: (progress.setMaximum(n), progress.setValue(k)))
+
+        def done(info: dict) -> None:
+            progress.close()
+            if info.get("cancelled"):
+                self.statusBar().showMessage("Video export cancelled", 5000)
+                return
+            w, h = info["size"]
+            self._done_box(f"Wrote {os.path.basename(info['path'])}\n{info['duration']:.2f} s, {info['frames']} "
+                           f"frames at {info['fps']:g} fps, {w} × {h} px", info["summary"],
+                           os.path.dirname(info["path"]))
+
+        def failed(msg: str) -> None:
+            progress.close()
+            QtWidgets.QMessageBox.critical(self, APP_NAME, f"Video export failed:\n\n{msg}")
+
+        thread.done.connect(done)
+        thread.failed.connect(failed)
+        thread.finished.connect(lambda: (self.tasks.discard(thread), self._update_actions()))
+        self.tasks.add(thread)
+        self._update_actions()
+        progress.show()
+        thread.start()
+        return thread
+
     # -- misc -------------------------------------------------------------------------
 
     def _update_actions(self) -> None:
@@ -1587,6 +1491,7 @@ class MainWindow(QtWidgets.QMainWindow):
             a.setEnabled(showing_stack and bool(self.frames.rows))
         has_times = showing_stack and bool(self.files[self.cur_key[0]].stacks[self.cur_key[1]].timestamps)
         self.a_export_ts.setEnabled(has_times)
+        self.a_video.setEnabled(showing_stack and bool(self.frames.rows) and not busy)
         self.busy.setVisible(busy)
 
     def _tree_menu(self, pos) -> None:
@@ -1598,6 +1503,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if item.data(0, Qt.UserRole)[0] == "stack":
             menu.addAction(self.a_save_stack)
             menu.addAction(self.a_save_png)
+            menu.addAction(self.a_video)
             menu.addAction(self.a_export_ts)
             menu.addSeparator()
         menu.addAction(self.a_export)

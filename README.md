@@ -10,10 +10,13 @@ Bio-Formats rejects these files ("Unknown file format"), so this reads them dire
 
 - Drag & drop `.msr` files or folders into the viewer
 - Overview of all stacks in the measurement workspace
-- Zoom/pan, scale bar, LUTs, histogram/contrast, frame slider and playback with the real frame times
+- Zoom/pan, scale bar, LUTs, histogram/contrast, frame slider
+- Timelapse playback in real time (the recorded frame intervals, × speed) or at a fixed frame rate
 - All metadata: pixel size, frame timestamps, objective and every ImSpector setting (filter, compare two stacks)
 - Export to OME-TIFF or ImageJ TIFF with physical pixel size and frame times, plus a `metadata.json`
 - Frame times as plain text, one value (s) per line
+- MP4 video of a timelapse or z sweep: real acquisition timing (× speed, e.g. 0.25 = four times slower)
+  or a fixed frame rate, with optional scale bar and time stamp
 - Pixel data is exported bit-exact, no rescaling
 
 ## Install
@@ -23,6 +26,7 @@ Python ≥ 3.10 with numpy, tifffile and PyQt5, for example:
     conda create -n msr python=3.12 numpy tifffile pyqt
 
 Tested with numpy 1.26–2.5, tifffile 2023.4–2026.6 and PyQt5 5.15.
+Video export needs ffmpeg: `pip install imageio-ffmpeg` (bundles it) or any ffmpeg on PATH.
 
 ## Usage
 
@@ -32,6 +36,9 @@ Viewer:
 
 On Windows you can also drop files onto `MSR_Viewer.bat`; adjust its `ENV` line to your conda env.
 Wheel = zoom, drag = pan, double-click = fit, ←/→ = frame, Space = play.
+Next to the play button you choose *real time* (with a speed factor) or *fixed fps*; File ▸ Export video
+writes the same as MP4. In real time each frame is held for its recorded interval; the file itself has a
+constant frame rate (60 fps by default), so it plays everywhere and the timing is exact to one video frame.
 
 Export without GUI:
 

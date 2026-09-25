@@ -20,6 +20,9 @@ Bio-Formats rejects these files ("Unknown file format"), so this reads them dire
 - Pixel data is exported bit-exact, no rescaling
 - PSF analysis on demand (Tools ▸ PSF analysis): click a bead, get lateral x/y and (for z-stacks) axial
   widths at FWHM, 1/e or 1/e², from the threshold crossings and a Gaussian fit
+- Line scan / correlation on demand (Tools ▸ Line scan): pick stacks (also from different files), compare
+  their profiles along a line, Pearson r along the line and over the image, optional sub-pixel alignment;
+  per frame or as mean / max projection; plot (PNG/PDF/SVG), CSV and image export
 
 ## Install
 
@@ -29,7 +32,8 @@ Python ≥ 3.10 with numpy, tifffile and PyQt5, for example:
 
 Tested with numpy 1.26–2.5, tifffile 2023.4–2026.6 and PyQt5 5.15.
 Video export needs ffmpeg: `pip install imageio-ffmpeg` (bundles it) or any ffmpeg on PATH.
-The PSF analysis needs pyqtgraph, and scipy for the Gaussian fit and spline sampling.
+The PSF analysis and the line scan need pyqtgraph; scipy, scikit-image and matplotlib are optional
+(Gaussian fit, spline sampling, sub-pixel alignment, plot export).
 
 ## Usage
 
@@ -49,6 +53,13 @@ sampled with cubic splines (bilinear sampling between pixel centres would broade
 optionally averaged over parallel lines and rotated. Widths are measured above a baseline (profile ends,
 a movable background box, or zero); for z-stacks the axial profile is the mean of a small box in every slice.
 Results can be copied or saved as CSV / PNG.
+
+Line scan / correlation first asks which stacks to compare (same X × Y size), then opens its own window: a
+composite (or one stack at a time) with a line whose ends and centre can be dragged, the profiles of all
+stacks along it (optionally averaged over a band and normalized), and Pearson r for every pair. *Align to
+first stack* registers each stack to the first one by cross-correlation of lightly smoothed, Hann-windowed
+images with sub-pixel refinement (within 0.02 px on synthetic shifts; plain phase correlation without a
+window can be off by pixels because of the image edges). Names and colours are editable in the table.
 
 Export without GUI:
 

@@ -8,7 +8,8 @@ Drop .msr files or folders onto the window (or onto MSR_Viewer.bat in Explorer).
 Parsing and TIFF export are done by msr_reader.py, which must sit next to this file.
 
 Playback runs in real time (recorded frame intervals x speed) or at a fixed frame
-rate; File > Export video writes the same as MP4 (msr_video.py).
+rate; File > Export video writes the same as MP4 (msr_video.py).  Tools: PSF analysis
+(msr_psf.py) and line scan / correlation across stacks (msr_linescan.py), on demand.
 
 Mouse: wheel = zoom, drag = pan, double-click = fit.
 Keys:  Left/Right = previous/next frame, Home/End = first/last frame, Space = play
@@ -886,6 +887,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._hist_skip = 0
         self.tasks: set[Task] = set()
         self.psf = None  # msr_psf.PSFPanel, created when first switched on
+        self.linescan_windows: list = []
         self._build_ui()
         self._build_actions()
         for w in self.findChildren(QtWidgets.QWidget):
@@ -1009,6 +1011,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_psf.setShortcut(QtGui.QKeySequence("Ctrl+Shift+P"))
         self.a_psf.setToolTip("Measure bead widths (FWHM, 1/e): click a bead, lateral x/y and axial z profiles")
         self.a_psf.toggled.connect(self.toggle_psf)
+        self.a_linescan = act("&Line scan / correlation…", self.open_linescan, "Ctrl+Shift+L",
+                              tip="Profiles of several stacks along a line, alignment and correlation (own window)")
 
         mb = self.menuBar()
         m = mb.addMenu("&File")
@@ -1020,6 +1024,7 @@ class MainWindow(QtWidgets.QMainWindow):
             m.addSeparator() if a is None else m.addAction(a)
         self.tools_menu = mb.addMenu("&Tools")
         self.tools_menu.addAction(self.a_psf)
+        self.tools_menu.addAction(self.a_linescan)
         mb.addMenu("&Help").addAction(self.a_about)
 
         tb = self.addToolBar("Main")
@@ -1027,7 +1032,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tb.setMovable(False)
         tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         for a in (self.a_open, self.a_export, self.a_video, None, self.a_fit, self.a_1to1, self.a_scalebar, None,
-                  self.a_psf):
+                  self.a_psf, self.a_linescan):
             tb.addSeparator() if a is None else tb.addAction(a)
         self.toolbar = tb
 
@@ -1520,6 +1525,31 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tabs.removeTab(i)
         self._update_actions()
 
+    def open_linescan(self) -> None:
+        """Pick stacks, then compare them along a line in a separate window."""
+        if not self.files:
+            return
+        try:
+            import msr_linescan
+        except ImportError as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, "The line scan needs pyqtgraph:\n\n"
+                                          f"    pip install pyqtgraph\n\n({exc})")
+            return
+        current = self.cur_key if self.center.currentWidget() is self.viewer_page else None
+        dlg = msr_linescan.StackPickerDialog(self.files, current, self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        stacks, names = dlg.selection()
+        QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            win = msr_linescan.LineScanWindow(stacks, names, self)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self.linescan_windows.append(win)
+        win.destroyed.connect(lambda *_, w=win: self.linescan_windows.remove(w)
+                              if w in self.linescan_windows else None)
+        win.show()
+
     def _psf_feed(self, new_stack: bool = False) -> None:
         if self.psf is None or not self.psf.active or self.cur_key is None or self.frame is None:
             return
@@ -1548,6 +1578,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_export_ts.setEnabled(has_times)
         self.a_video.setEnabled(showing_stack and bool(self.frames.rows) and not busy)
         self.a_psf.setEnabled(showing_stack or self.a_psf.isChecked())
+        self.a_linescan.setEnabled(bool(self.files))
         self.busy.setVisible(busy)
 
     def _tree_menu(self, pos) -> None:
@@ -1561,6 +1592,8 @@ class MainWindow(QtWidgets.QMainWindow):
             menu.addAction(self.a_save_png)
             menu.addAction(self.a_video)
             menu.addAction(self.a_export_ts)
+            menu.addSeparator()
+            menu.addAction(self.a_linescan)
             menu.addSeparator()
         menu.addAction(self.a_export)
         menu.addAction(self.a_export_ij)

@@ -885,6 +885,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mapper = IntensityMapper()
         self._hist_skip = 0
         self.tasks: set[Task] = set()
+        self.psf = None  # msr_psf.PSFPanel, created when first switched on
         self._build_ui()
         self._build_actions()
         for w in self.findChildren(QtWidgets.QWidget):
@@ -1003,6 +1004,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_prev = act("Previous frame", lambda: self.frames.step(-1), ",")
         self.a_next = act("Next frame", lambda: self.frames.step(1), ".")
         self.a_about = act("&About", self.about)
+        self.a_psf = QtWidgets.QAction("&PSF analysis", self)
+        self.a_psf.setCheckable(True)
+        self.a_psf.setShortcut(QtGui.QKeySequence("Ctrl+Shift+P"))
+        self.a_psf.setToolTip("Measure bead widths (FWHM, 1/e): click a bead, lateral x/y and axial z profiles")
+        self.a_psf.toggled.connect(self.toggle_psf)
 
         mb = self.menuBar()
         m = mb.addMenu("&File")
@@ -1012,14 +1018,18 @@ class MainWindow(QtWidgets.QMainWindow):
         m = mb.addMenu("&View")
         for a in (self.a_fit, self.a_1to1, self.a_scalebar, None, self.a_play, self.a_prev, self.a_next):
             m.addSeparator() if a is None else m.addAction(a)
+        self.tools_menu = mb.addMenu("&Tools")
+        self.tools_menu.addAction(self.a_psf)
         mb.addMenu("&Help").addAction(self.a_about)
 
         tb = self.addToolBar("Main")
         tb.setObjectName("main_toolbar")
         tb.setMovable(False)
         tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        for a in (self.a_open, self.a_export, self.a_video, None, self.a_fit, self.a_1to1, self.a_scalebar):
+        for a in (self.a_open, self.a_export, self.a_video, None, self.a_fit, self.a_1to1, self.a_scalebar, None,
+                  self.a_psf):
             tb.addSeparator() if a is None else tb.addAction(a)
+        self.toolbar = tb
 
     # -- file handling -------------------------------------------------------------
 
@@ -1113,6 +1123,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.frames.stop()
             self.frames.configure(self.files[key].stacks[0], "", ())
             self.arr, self.frame, self.cur_key = None, None, None
+            if self.psf is not None:
+                self.psf.clear()
             self.view.clear()
         item = self.file_items.pop(key)
         self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(item))
@@ -1188,6 +1200,7 @@ class MainWindow(QtWidgets.QMainWindow):
         st = self.states[self.cur_key]
         img = numpy_to_qimage(self.mapper.map(self.frame, st.lo, st.hi), COLOR_TABLES[st.lut])
         self.view.set_pixmap(QtGui.QPixmap.fromImage(img), reset)
+        self._psf_feed(new_stack=reset)
         if histogram:
             if self.frames.playing and self._hist_skip > 0:
                 self._hist_skip -= 1
@@ -1474,6 +1487,48 @@ class MainWindow(QtWidgets.QMainWindow):
         thread.start()
         return thread
 
+    # -- tools ------------------------------------------------------------------------
+
+    def toggle_psf(self, on: bool) -> None:
+        """PSF analysis as an extra, closable tab next to Display / Info / Settings."""
+        if on:
+            if self.psf is None:
+                try:
+                    import msr_psf
+                except ImportError as exc:
+                    self.a_psf.setChecked(False)
+                    QtWidgets.QMessageBox.warning(self, APP_NAME, "PSF analysis needs pyqtgraph:\n\n"
+                                                  f"    pip install pyqtgraph\n\n({exc})")
+                    return
+                self.psf = msr_psf.PSFPanel(self.view)
+                for w in [self.psf] + self.psf.findChildren(QtWidgets.QWidget):
+                    w.setAcceptDrops(False)
+            i = self.tabs.addTab(self.psf, "PSF")
+            close = QtWidgets.QToolButton()
+            close.setText("×")
+            close.setAutoRaise(True)
+            close.setToolTip("Close PSF analysis (Ctrl+Shift+P)")
+            close.clicked.connect(lambda: self.a_psf.setChecked(False))
+            self.tabs.tabBar().setTabButton(i, QtWidgets.QTabBar.RightSide, close)
+            self.tabs.setCurrentWidget(self.psf)
+            self.psf.activate()
+            self._psf_feed(new_stack=True)
+        elif self.psf is not None:
+            self.psf.deactivate()
+            i = self.tabs.indexOf(self.psf)
+            if i >= 0:
+                self.tabs.removeTab(i)
+        self._update_actions()
+
+    def _psf_feed(self, new_stack: bool = False) -> None:
+        if self.psf is None or not self.psf.active or self.cur_key is None or self.frame is None:
+            return
+        if new_stack or self.psf.stack is None:
+            s = self.files[self.cur_key[0]].stacks[self.cur_key[1]]
+            self.psf.set_stack(s, self.arr, self.frames.index(), self.frame)
+        else:
+            self.psf.set_frame(self.frame, self.frames.index())
+
     # -- misc -------------------------------------------------------------------------
 
     def _update_actions(self) -> None:
@@ -1492,6 +1547,7 @@ class MainWindow(QtWidgets.QMainWindow):
         has_times = showing_stack and bool(self.files[self.cur_key[0]].stacks[self.cur_key[1]].timestamps)
         self.a_export_ts.setEnabled(has_times)
         self.a_video.setEnabled(showing_stack and bool(self.frames.rows) and not busy)
+        self.a_psf.setEnabled(showing_stack or self.a_psf.isChecked())
         self.busy.setVisible(busy)
 
     def _tree_menu(self, pos) -> None:

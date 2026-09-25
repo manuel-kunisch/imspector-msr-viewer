@@ -2,3 +2,5 @@ numpy>=1.26
 tifffile>=2023.4.12
 PyQt5>=5.15   # only needed for the viewer
 imageio-ffmpeg   # only for video export (or ffmpeg on PATH)
+pyqtgraph        # only for the PSF analysis
+scipy            # optional: Gaussian fit and spline sampling in the PSF analysis

@@ -18,6 +18,8 @@ Bio-Formats rejects these files ("Unknown file format"), so this reads them dire
 - MP4 video of a timelapse or z sweep: real acquisition timing (× speed, e.g. 0.25 = four times slower)
   or a fixed frame rate, with optional scale bar and time stamp
 - Pixel data is exported bit-exact, no rescaling
+- PSF analysis on demand (Tools ▸ PSF analysis): click a bead, get lateral x/y and (for z-stacks) axial
+  widths at FWHM, 1/e or 1/e², from the threshold crossings and a Gaussian fit
 
 ## Install
 
@@ -27,6 +29,7 @@ Python ≥ 3.10 with numpy, tifffile and PyQt5, for example:
 
 Tested with numpy 1.26–2.5, tifffile 2023.4–2026.6 and PyQt5 5.15.
 Video export needs ffmpeg: `pip install imageio-ffmpeg` (bundles it) or any ffmpeg on PATH.
+The PSF analysis needs pyqtgraph, and scipy for the Gaussian fit and spline sampling.
 
 ## Usage
 
@@ -39,6 +42,13 @@ Wheel = zoom, drag = pan, double-click = fit, ←/→ = frame, Space = play.
 Next to the play button you choose *real time* (with a speed factor) or *fixed fps*; File ▸ Export video
 writes the same as MP4. In real time each frame is held for its recorded interval; the file itself has a
 constant frame rate (60 fps by default), so it plays everywhere and the timing is exact to one video frame.
+
+PSF analysis opens as an extra tab. A click on a bead snaps the cross to its centre (brightest pixel nearby,
+refined by the intensity centroid); drag the white circle to fine-tune. The profiles along both arms are
+sampled with cubic splines (bilinear sampling between pixel centres would broaden a PSF by ~2 % at σ = 2 px),
+optionally averaged over parallel lines and rotated. Widths are measured above a baseline (profile ends,
+a movable background box, or zero); for z-stacks the axial profile is the mean of a small box in every slice.
+Results can be copied or saved as CSV / PNG.
 
 Export without GUI:
 

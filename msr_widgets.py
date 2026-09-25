@@ -219,13 +219,57 @@ class ElidedLabel(QtWidgets.QLabel):
         p.drawText(r, int(Qt.AlignLeft | Qt.AlignVCenter), self.fontMetrics().elidedText(self.text(), self._mode, r.width()))
 
 
+class Handle(QtWidgets.QGraphicsObject):
+    """Draggable marker that keeps its size on screen at any zoom.
+
+    Its position is in the parent's coordinates (scene = image pixels for
+    top-level handles); *moved* reports every position change.
+    """
+
+    moved = QtCore.pyqtSignal(float, float)
+    released = QtCore.pyqtSignal()
+
+    def __init__(self, color="#ffffff", radius: float = 6.0, square: bool = False, parent=None):
+        super().__init__(parent)
+        self._r = float(radius)
+        self._color = QtGui.QColor(color)
+        self._square = square
+        self.setFlags(QtWidgets.QGraphicsItem.ItemIsMovable | QtWidgets.QGraphicsItem.ItemSendsGeometryChanges
+                      | QtWidgets.QGraphicsItem.ItemIgnoresTransformations)
+        self.setCursor(Qt.SizeAllCursor)
+        self.setZValue(20)
+
+    def boundingRect(self) -> QtCore.QRectF:
+        r = self._r + 2
+        return QtCore.QRectF(-r, -r, 2 * r, 2 * r)
+
+    def paint(self, p: QtGui.QPainter, option, widget=None) -> None:
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        rect = QtCore.QRectF(-self._r, -self._r, 2 * self._r, 2 * self._r)
+        for pen in (QtGui.QPen(QtGui.QColor(0, 0, 0, 190), 3.5), QtGui.QPen(self._color, 1.6)):
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(rect) if self._square else p.drawEllipse(rect)
+
+    def itemChange(self, change, value):
+        if change == QtWidgets.QGraphicsItem.ItemPositionHasChanged:
+            self.moved.emit(self.pos().x(), self.pos().y())
+        return super().itemChange(change, value)
+
+    def mouseReleaseEvent(self, ev) -> None:
+        super().mouseReleaseEvent(ev)
+        self.released.emit()
+
+
 class ImageView(QtWidgets.QGraphicsView):
     """Zoomable image with a scale bar overlay.
 
     Scene coordinates are image pixels (the pixmap sits at 0, 0), so overlay
-    items can be placed directly in pixel units.
+    items can be placed directly in pixel units.  A click that is not a pan
+    (and not on a movable overlay item) is reported by *clicked*.
     """
 
+    clicked = QtCore.pyqtSignal(float, float)
     mouseMoved = QtCore.pyqtSignal(float, float)
     mouseLeft = QtCore.pyqtSignal()
     zoomChanged = QtCore.pyqtSignal(float)
@@ -252,6 +296,28 @@ class ImageView(QtWidgets.QGraphicsView):
         self.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(True)
+        self._press: QtCore.QPoint | None = None
+
+    def image_size(self) -> tuple[int, int]:
+        """(width, height) of the shown image in pixels, (0, 0) if none."""
+        if not self._has_image:
+            return 0, 0
+        pix = self._item.pixmap()
+        return pix.width(), pix.height()
+
+    def mousePressEvent(self, ev) -> None:
+        on_item = any(it is not self._item and it.flags() & QtWidgets.QGraphicsItem.ItemIsMovable
+                      for it in self.items(ev.pos()))
+        self._press = ev.pos() if ev.button() == Qt.LeftButton and not on_item else None
+        super().mousePressEvent(ev)
+
+    def mouseReleaseEvent(self, ev) -> None:
+        super().mouseReleaseEvent(ev)
+        if (self._press is not None and ev.button() == Qt.LeftButton and self._has_image
+                and (ev.pos() - self._press).manhattanLength() < 4):
+            p = self.mapToScene(ev.pos())
+            self.clicked.emit(p.x(), p.y())
+        self._press = None
 
     def set_pixmap(self, pix: QtGui.QPixmap, reset: bool) -> None:
         self._item.setPixmap(pix)

@@ -24,7 +24,8 @@ Bio-Formats rejects these files ("Unknown file format"), so this reads them dire
   their profiles along a line, Pearson r along the line and over the image, optional sub-pixel alignment;
   per frame or as mean / max projection; plot (PNG/PDF/SVG), CSV and image export
 - TIFF, OME-TIFF and ImageJ TIFF files open next to `.msr` files for the same viewing and analyses (PSF,
-  line scan across both, video, frame times); calibration and frame times are used where the file has them
+  line scan across both, video, frame times); calibration and frame times are used where the file has them,
+  missing ones can be set (Tools ▸ Calibration)
 
 ## Install
 
@@ -77,7 +78,9 @@ TIFF files (`msr_tiff.py`): every channel of every image series becomes a stack,
 `.msr`. Pixel size, z step, frame interval, per-frame times and channel names come from the OME-XML, the
 ImageJ metadata (unit, spacing, finterval) or the resolution tags (only cm / mm / µm, a dpi value is not a
 calibration). The exports of this tool come back with all ImSpector metadata and settings. Without any axis
-information the pages are taken as Z slices, as ImageJ and Bio-Formats do. Uncompressed data are
+information the pages are taken as Z slices, as ImageJ and Bio-Formats do. Tools ▸ Calibration makes them
+time points and fills in a missing pixel size, z step or frame interval (until the file is closed; Save
+stack writes it into an OME-TIFF). Uncompressed data are
 memory-mapped, also when written page by page as cameras do; LZW / JPEG compressed TIFFs need
 `pip install imagecodecs`. Export all stacks stays an `.msr` function, single TIFF stacks can be saved again.
 

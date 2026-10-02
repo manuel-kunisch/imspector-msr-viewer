@@ -16,9 +16,11 @@ Files written by msr_reader.py also carry the ImSpector metadata and settings
 shows the same information as the .msr file.
 
 The pages of a TIFF without axis information are taken as Z slices, as ImageJ
-and Bio-Formats do.  Uncompressed data are memory-mapped, also when written page
-by page (as cameras do); compressed, scattered or big-endian data are read into
-memory (LZW and JPEG need the imagecodecs package).
+and Bio-Formats do; TIFFStack.set_calibration (Tools ▸ Calibration in the viewer)
+makes them time points and sets missing sizes.  Uncompressed data are
+memory-mapped, also when written page by page (as cameras do); compressed,
+scattered or big-endian data are read into memory (LZW and JPEG need the
+imagecodecs package).
 """
 
 from __future__ import annotations
@@ -190,7 +192,8 @@ def _ome_images(root) -> list[dict]:
         settings = _child(img, "ObjectiveSettings")
         obj = objectives.get(settings.get("ID")) if settings is not None else None
         if obj is not None:
-            d["objective"] = {k: v for k, v in (("ObjectiveID", obj.get("Model", "")), ("ObjectiveNA", obj.get("LensNA", "")),
+            d["objective"] = {k: v for k, v in (("ObjectiveID", obj.get("Model", "")),
+                                                ("ObjectiveNA", obj.get("LensNA", "")),
                                                 ("ObjectiveImmersion", obj.get("Immersion", "")),
                                                 ("Magnification", obj.get("NominalMagnification", ""))) if v}
         images.append(d)
@@ -307,6 +310,7 @@ class TIFFStack(mr.DataStack):
     series: int = 0
     channel: int = 0
     assumed: str = ""  # axis letter given without metadata ('Z' for the pages of a plain TIFF)
+    assumed_dim: int = -1  # index of that axis in sizes / labels
     access: str = ""   # 'memory-mapped' or 'read into memory'
     _file: "TIFFFile | None" = field(default=None, repr=False, compare=False)
     _select: tuple = field(default=(), repr=False, compare=False)
@@ -314,6 +318,29 @@ class TIFFStack(mr.DataStack):
     def asarray(self) -> np.ndarray:
         """Pixel data with axes :attr:`axes` (a view of the memory-mapped or loaded series)."""
         return self._file._series_data(self.series)[self._select]
+
+    def set_calibration(self, pixel_size: float | None = None, z_step: float | None = None,
+                        frame_interval: float | None = None, frames: str | None = None) -> None:
+        """Set what the file does not say: pixel size and z step in µm, frame interval in s.
+
+        0 makes a value unknown, None leaves it.  *frames* ('Z' or 'T') says what the pages
+        of a TIFF without axis information are; it only applies to that assumed axis.
+        """
+        if frames in ("Z", "T") and self.assumed and frames != self.assumed:
+            if frames in self.axes:
+                raise ValueError(f"the stack already has a {frames} axis")
+            k = self.assumed_dim
+            self.labels[k], self.lengths[k], self.units[k] = _LABELS[frames], 0.0, ""
+            self.assumed = frames
+        if pixel_size is not None:
+            for k in (0, 1):
+                self.lengths[k] = pixel_size * self.sizes[k] if pixel_size > 0 else 0.0
+                self.units[k] = "µm" if pixel_size > 0 else ""
+        for letter, value, unit in (("Z", z_step, "µm"), ("T", frame_interval, "s")):
+            k = next((i for i, c in enumerate(self.dim_letters) if c == letter), None)
+            if value is not None and k is not None:
+                self.lengths[k] = value * self.sizes[k] if value > 0 else 0.0
+                self.units[k] = unit if value > 0 else ""
 
 
 class TIFFFile:
@@ -436,7 +463,8 @@ class TIFFFile:
             try:  # fails early if the compression needs imagecodecs
                 series.keyframe.asarray()
             except ValueError as exc:
-                raise ValueError(f"{exc} (pip install imagecodecs)" if "imagecodecs" in str(exc) else str(exc)) from None
+                hint = " (pip install imagecodecs)" if "imagecodecs" in str(exc) else ""
+                raise ValueError(f"{exc}{hint}") from None
         chan = [i for i, (a, n) in enumerate(dims) if a in "CS" and n > 1]
         drop = [i for i, (a, n) in enumerate(dims) if n == 1 and a not in "YX" and i not in chan]
         keep = [i for i in range(len(dims)) if i not in chan and i not in drop]
@@ -461,7 +489,7 @@ class TIFFFile:
         dt = dt if dt else None
 
         # one label per remaining axis; pages without axis information become Z (or T) slices
-        letters, labels_other, assumed = [], [], ""
+        letters, labels_other, assumed, assumed_j = [], [], "", -1
         present = {dims[i][0] for i in other}
         for i in other:
             a = dims[i][0]
@@ -470,7 +498,7 @@ class TIFFFile:
                 label = _LABELS[a]
             elif not assumed and ("Z" not in present or "T" not in present):
                 letter = assumed = "Z" if "Z" not in present else "T"
-                label = _LABELS[letter]
+                label, assumed_j = _LABELS[letter], len(letters)
             else:
                 letter, label = "Q", "Frame"
             letters.append(letter)
@@ -479,6 +507,7 @@ class TIFFFile:
         nx, ny = dims[keep[-1]][1], dims[keep[-2]][1]
         steps = {"Z": (dz, "µm"), "T": (dt, "s")}
         sizes = [nx, ny] + [dims[i][1] for i in reversed(other)]
+        assumed_dim = 1 + len(other) - assumed_j if assumed else -1  # its index in sizes (fastest first)
         labels = ["X", "Y"] + list(reversed(labels_other))
         lengths = [px * nx if px else 0.0, py * ny if py else 0.0]
         units = ["µm" if px else "", "µm" if py else ""]
@@ -522,14 +551,15 @@ class TIFFFile:
             st = TIFFStack(index=len(self.stacks), class_name="TIFF", schema=0, offset=int(series.dataoffset or 0),
                            path=self.path, name=series.name or "", time=ann["time"] or _clock(date),
                            source=info.get("source") or self.kind, title=series.name or "", meta=meta,
-                           channel_id=name, sizes=sizes, lengths=lengths, labels=labels, units=units,
+                           channel_id=name, sizes=list(sizes), lengths=list(lengths), labels=list(labels),
+                           units=list(units),
                            timestamps=self._times(ome, c if "C" in pick else 0, n_t),
                            dtype="uint8" if dtype.kind == "b" else dtype.name,
                            data_offset=int(series.dataoffset or 0),
                            properties=settings, header={"series": si, "axes": axes, "shape": list(shape),
                                                         "kind": getattr(series, "kind", "")},
                            parse_mode="tifffile", camera_stamp=cam, series=si, channel=k, assumed=assumed,
-                           access=access, _file=self, _select=tuple(sel))
+                           assumed_dim=assumed_dim, access=access, _file=self, _select=tuple(sel))
             if st.shape != tuple(dims[i][1] for i in keep):
                 raise ValueError(f"axes {axes} could not be mapped ({st.axes} {st.shape})")
             self.stacks.append(st)

@@ -127,6 +127,12 @@ def _stack_label(pos: int, s: mr.DataStack) -> str:
     return f"S{pos + 1}  {s.channel_id.split(':')[0] or s.source}"
 
 
+def _stack_tooltip(s: mr.DataStack) -> str:
+    px = s.pixel_size[0]
+    ident = f"{s.channel_id}  ({s.source})" if s.channel_id else s.source
+    return f"{ident}\naxes {s.axes}, {_shape_text(s)}, {s.dtype}" + (f"\n{px:.4g} µm/px" if px else "")
+
+
 def _openable(path: str) -> bool:
     return path.lower().endswith((".msr",) + mt.TIFF_EXTENSIONS)
 
@@ -855,6 +861,81 @@ class DropOverlay(QtWidgets.QWidget):
         p.drawText(self.rect().adjusted(0, 70, 0, 70), Qt.AlignCenter, ".msr / TIFF files or folders")
 
 
+class CalibrationDialog(QtWidgets.QDialog):
+    """Pixel size, z step, frame interval and frame meaning for TIFF stacks (Tools ▸ Calibration)."""
+
+    def __init__(self, stack: mt.TIFFStack, n_stacks: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Calibration")
+        self.stack = stack
+        lay = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+        lay.addLayout(form)
+
+        def spin(value, suffix: str, decimals: int) -> QtWidgets.QDoubleSpinBox:
+            sb = QtWidgets.QDoubleSpinBox()
+            sb.setRange(0.0, 1e6)
+            sb.setDecimals(decimals)
+            sb.setSuffix(suffix)
+            sb.setSpecialValueText("unknown")
+            sb.setValue(value or 0.0)
+            return sb
+
+        self.pixel = spin(stack.pixel_size[0], " µm", 5)
+        form.addRow("Pixel size", self.pixel)
+        self.frames = QtWidgets.QComboBox()
+        self.frames.addItems(["Z slices", "time points"])
+        self.frames.setCurrentIndex(1 if stack.assumed == "T" else 0)
+        if stack.assumed:
+            other = "T" if stack.assumed == "Z" else "Z"
+            self.frames.setEnabled(other not in stack.axes)
+            form.addRow("Frames are", self.frames)
+        self.z_step = spin(stack.step("Z"), " µm", 5)
+        self.interval = spin(stack.time_increment if "T" in stack.axes else None, " s", 6)
+        if stack.timestamps:
+            self.interval.setEnabled(False)
+            self.interval.setToolTip("from the per-frame times in the file")
+        self.z_label, self.t_label = QtWidgets.QLabel("Z step"), QtWidgets.QLabel("Frame interval")
+        form.addRow(self.z_label, self.z_step)
+        form.addRow(self.t_label, self.interval)
+        self.all = QtWidgets.QCheckBox(f"Apply to all {n_stacks} stacks of this file")
+        self.all.setChecked(True)
+        self.all.setVisible(n_stacks > 1)
+        lay.addWidget(self.all)
+        note = QtWidgets.QLabel("Used until the file is closed, not written into it. File ▸ Save current stack "
+                                "(OME-TIFF) keeps it.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #9a9a9a;")
+        lay.addWidget(note)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+        self.frames.currentIndexChanged.connect(self._rows)
+        self._rows()
+
+    def _letters(self) -> set:
+        letters = set(self.stack.axes[:-2])
+        if self.stack.assumed:
+            letters.discard(self.stack.assumed)
+            letters.add("ZT"[self.frames.currentIndex()])
+        return letters
+
+    def _rows(self) -> None:
+        letters = self._letters()
+        for label, w, letter in ((self.z_label, self.z_step, "Z"), (self.t_label, self.interval, "T")):
+            label.setVisible(letter in letters)
+            w.setVisible(letter in letters)
+
+    def values(self) -> dict:
+        """Keyword arguments for TIFFStack.set_calibration."""
+        letters = self._letters()
+        return {"pixel_size": self.pixel.value(),
+                "frames": "ZT"[self.frames.currentIndex()] if self.stack.assumed else None,
+                "z_step": self.z_step.value() if "Z" in letters else None,
+                "frame_interval": self.interval.value() if "T" in letters and self.interval.isEnabled() else None}
+
+
 class Task(QtCore.QThread):
     """Runs a function in the background (exports)."""
 
@@ -1018,6 +1099,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_psf.toggled.connect(self.toggle_psf)
         self.a_linescan = act("&Line scan / correlation…", self.open_linescan, "Ctrl+Shift+L",
                               tip="Profiles of several stacks along a line, alignment and correlation (own window)")
+        self.a_calibrate = act("&Calibration…", self.edit_calibration,
+                               tip="Pixel size, z step and frame interval of a TIFF stack that lacks them")
 
         mb = self.menuBar()
         m = mb.addMenu("&File")
@@ -1030,6 +1113,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tools_menu = mb.addMenu("&Tools")
         self.tools_menu.addAction(self.a_psf)
         self.tools_menu.addAction(self.a_linescan)
+        self.tools_menu.addSeparator()
+        self.tools_menu.addAction(self.a_calibrate)
         mb.addMenu("&Help").addAction(self.a_about)
 
         tb = self.addToolBar("Main")
@@ -1114,10 +1199,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                                + (f"  ·  {s.time}" if s.time else "")])
             child.setIcon(0, QtGui.QIcon(thumb))
             child.setData(0, Qt.UserRole, ("stack", key, pos))
-            px = s.pixel_size[0]
-            ident = f"{s.channel_id}  ({s.source})" if s.channel_id else s.source
-            child.setToolTip(0, f"{ident}\naxes {s.axes}, {_shape_text(s)}, {s.dtype}"
-                             + (f"\n{px:.4g} µm/px" if px else ""))
+            child.setToolTip(0, _stack_tooltip(s))
             top.addChild(child)
         self.tree.addTopLevelItem(top)
         top.setExpanded(True)
@@ -1305,12 +1387,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if tiff:
             frames = {"Z": "Z slices", "T": "time points"}.get(s.assumed)
             acq += [("Image series", f"{s.series + 1} of {msr.series_count}" + (f"  ({s.name})" if s.name else "")),
-                    ("Frames", f"taken as {frames} (the file has no axis information)" if frames else "")]
+                    ("Frames", f"taken as {frames} (the file has no axis information; Tools ▸ Calibration)"
+                     if frames else "")]
         else:
             acq.append(("Workspace", f"S{pos + 1} (element {s.index} of the stack array)"))
         geo = [("Axes", " × ".join(f"{n} {a}" for a, n in zip(s.axes, s.shape))),
                ("Data type", s.dtype),
-               ("Pixel size", f"{px:.4g} × {py:.4g} µm" if px and py else "not in the file"),
+               ("Pixel size", f"{px:.4g} × {py:.4g} µm" if px and py
+                else "not in the file" + (" (Tools ▸ Calibration)" if tiff else "")),
                ("Field of view", f"{fov[0]['length']:.4g} × {fov[1]['length']:.4g} µm" if px and py and all(fov)
                 else "")]
         if dt:
@@ -1595,6 +1679,32 @@ class MainWindow(QtWidgets.QMainWindow):
                               if w in self.linescan_windows else None)
         win.show()
 
+    def edit_calibration(self) -> None:
+        """Set pixel size, z step and frame interval of TIFF stacks; the view and the tools follow."""
+        if self.cur_key is None or self.center.currentWidget() is not self.viewer_page:
+            return
+        key, pos = self.cur_key
+        f = self.files[key]
+        s = f.stacks[pos]
+        if not isinstance(s, mt.TIFFStack):
+            return
+        dlg = CalibrationDialog(s, len(f.stacks), self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        errors = []
+        for t in (f.stacks if dlg.all.isChecked() else [s]):
+            try:
+                t.set_calibration(**dlg.values())
+            except ValueError as exc:
+                errors.append(f"{_stack_label(f.stacks.index(t), t)}: {exc}")
+        for i, t in enumerate(f.stacks):
+            self.file_items[key].child(i).setToolTip(0, _stack_tooltip(t))
+        self.cur_key = None  # shown again: sliders, scale bar and the PSF tab use the new values
+        self._show_stack(key, pos)
+        self._update_actions()
+        if errors:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, "Not changed:\n\n" + "\n".join(errors))
+
     def _psf_feed(self, new_stack: bool = False) -> None:
         if self.psf is None or not self.psf.active or self.cur_key is None or self.frame is None:
             return
@@ -1625,6 +1735,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_video.setEnabled(showing_stack and bool(self.frames.rows) and not busy)
         self.a_psf.setEnabled(showing_stack or self.a_psf.isChecked())
         self.a_linescan.setEnabled(bool(self.files))
+        self.a_calibrate.setEnabled(showing_stack and not busy
+                                    and isinstance(self.files[self.cur_key[0]].stacks[self.cur_key[1]], mt.TIFFStack))
         self.busy.setVisible(busy)
 
     def _tree_menu(self, pos) -> None:
@@ -1640,6 +1752,8 @@ class MainWindow(QtWidgets.QMainWindow):
             menu.addAction(self.a_export_ts)
             menu.addSeparator()
             menu.addAction(self.a_linescan)
+            if self.a_calibrate.isEnabled():
+                menu.addAction(self.a_calibrate)
             menu.addSeparator()
         menu.addAction(self.a_export)
         menu.addAction(self.a_export_ij)

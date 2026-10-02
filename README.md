@@ -11,6 +11,8 @@ Bio-Formats rejects these files ("Unknown file format"), so this reads them dire
 - Drag & drop `.msr` files or folders into the viewer
 - Overview of all stacks in the measurement workspace
 - Zoom/pan, scale bar, LUTs, histogram/contrast, frame slider
+- Composite (View ▸ Composite, C): the channels of a file merged as in ImageJ's composite mode, each with its
+  own colour and levels; also for PNG and MP4 export
 - Timelapse playback in real time (the recorded frame intervals, × speed) or at a fixed frame rate
 - All metadata: pixel size, frame timestamps, objective and every ImSpector setting (filter, compare two stacks)
 - Export to OME-TIFF or ImageJ TIFF with physical pixel size and frame times, plus a `metadata.json`
@@ -59,6 +61,12 @@ Wheel = zoom, drag = pan, double-click = fit, ←/→ = frame, Space = play.
 Next to the play button you choose *real time* (with a speed factor) or *fixed fps*; File ▸ Export video
 writes the same as MP4. In real time each frame is held for its recorded interval; the file itself has a
 constant frame rate (60 fps by default), so it plays everywhere and the timing is exact to one video frame.
+
+Composite merges the stacks of a file that have the same axes and size (the detectors of one acquisition, the
+channels of a TIFF), each scaled to its own levels and added in its own colour, as ImageJ does (red, green,
+blue, gray, cyan, magenta, yellow; the colour button picks another). A click on a channel in the table makes
+Min / Max and the histogram below act on it; frame and zoom stay. Save view as PNG and Export video write
+the composite; the PSF tab measures the selected channel.
 
 PSF analysis opens as an extra tab. A click on a bead snaps the cross to its centre (brightest pixel nearby,
 refined by the intensity centroid); drag the white circle to fine-tune. The profiles along both arms are

@@ -24,13 +24,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
 import msr_reader as mr
-from msr_widgets import IntensityMapper, paint_overlays, qimage_to_rgb, render_rgb, rgb_to_qimage
+from msr_widgets import IntensityMapper, composite_rgb, paint_overlays, qimage_to_rgb, render_rgb, rgb_to_qimage
 
 OUTPUT_RATES = (24, 25, 30, 50, 60, 100, 120)
 
@@ -181,6 +181,7 @@ class VideoSettings:
     lut: str = "Gray"
     lo: float = 0.0
     hi: float = 1.0
+    layers: list = field(default_factory=list)  # composite: (stack, (r, g, b), lo, hi) per channel
 
 
 class FrameRenderer:
@@ -198,6 +199,8 @@ class FrameRenderer:
         px = stack.pixel_size[0]
         self.per_px = px / s.scale if px else None
         self.unit = stack.units[0] if stack.units and stack.units[0] else "µm"
+        self.layers = [(t.asarray(), color, lo, hi) for t, color, lo, hi in s.layers]
+        self.mappers = [IntensityMapper() for _ in self.layers]
 
     def label(self, i: int) -> str | None:
         if not self.s.label:
@@ -211,7 +214,11 @@ class FrameRenderer:
     def render(self, i: int) -> np.ndarray:
         idx = list(self.base)
         idx[self.s.axis] = i
-        rgb = render_rgb(np.asarray(self.arr[tuple(idx)]), self.s.lo, self.s.hi, self.s.lut, self.mapper)
+        if self.layers:
+            rgb = composite_rgb([(np.asarray(a[tuple(idx)]), lo, hi, color) for a, color, lo, hi in self.layers],
+                                self.mappers)
+        else:
+            rgb = render_rgb(np.asarray(self.arr[tuple(idx)]), self.s.lo, self.s.hi, self.s.lut, self.mapper)
         if self.s.scale > 1:
             rgb = np.repeat(np.repeat(rgb, self.s.scale, axis=0), self.s.scale, axis=1)
         text = self.label(i)
@@ -460,5 +467,6 @@ class VideoExportDialog(QtWidgets.QDialog):
             real_time=self.real.isChecked(), speed=self.speed.value(), out_fps=float(self.out_fps.currentData()),
             fps=float(self.fps.value()), scale=int(self.scale.currentData()), scalebar=self.scalebar.isChecked(),
             label=self.label.isChecked(), lut=self.defaults.get("lut", "Gray"),
-            lo=float(self.defaults.get("lo", 0.0)), hi=float(self.defaults.get("hi", 1.0)))
+            lo=float(self.defaults.get("lo", 0.0)), hi=float(self.defaults.get("hi", 1.0)),
+            layers=list(self.defaults.get("layers", [])))
 

@@ -83,6 +83,30 @@ def render_rgb(frame: np.ndarray, lo: float, hi: float, lut: str,
     return LUTS[lut][mapper.map(frame, lo, hi)]
 
 
+# channel colours of a composite, in ImageJ's order
+COMPOSITE_COLORS = ("#ff0000", "#00ff00", "#0000ff", "#ffffff", "#00ffff", "#ff00ff", "#ffff00")
+
+
+def composite_rgb(layers, mappers=None) -> np.ndarray | None:
+    """Additive colour merge of channels, as ImageJ's composite mode.
+
+    *layers*: (frame, lo, hi, (r, g, b)) per channel, each scaled to its own display
+    range and tinted with its colour; overlapping colours add up (clipped at 255).
+    *mappers*: one IntensityMapper per layer, kept by the caller so the lookup
+    tables are reused from frame to frame.  None if there is no layer.
+    """
+    out = None
+    for i, (frame, lo, hi, color) in enumerate(layers):
+        mapper = mappers[i] if mappers else IntensityMapper()
+        tint = (np.arange(256, dtype=np.uint16)[:, None] * np.asarray(color[:3], dtype=np.uint16)) // 255
+        part = tint[mapper.map(frame, lo, hi)]
+        if out is None:
+            out = part
+        else:
+            out += part
+    return None if out is None else np.minimum(out, 255).astype(np.uint8)
+
+
 # -----------------------------------------------------------------------------
 # images and painting
 # -----------------------------------------------------------------------------

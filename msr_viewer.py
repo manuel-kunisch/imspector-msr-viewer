@@ -34,8 +34,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import msr_reader as mr  # noqa: E402
 import msr_tiff as mt  # noqa: E402
 import msr_video as mv  # noqa: E402
-from msr_widgets import (COLOR_TABLES, LUTS, ElidedLabel, ImageView, IntensityMapper,  # noqa: E402
-                         numpy_to_qimage, paint_overlays, render_rgb, rgb_to_qimage)
+from msr_widgets import (COLOR_TABLES, COMPOSITE_COLORS, LUTS, ElidedLabel, ImageView,  # noqa: E402
+                         IntensityMapper, composite_rgb, numpy_to_qimage, paint_overlays, render_rgb,
+                         rgb_to_qimage)
 
 APP_NAME = "MSR Viewer"
 __version__ = "0.3.1"
@@ -125,6 +126,31 @@ def _thumbnail(stack: mr.DataStack, size: int = 200) -> QtGui.QPixmap:
 
 def _stack_label(pos: int, s: mr.DataStack) -> str:
     return f"S{pos + 1}  {s.channel_id.split(':')[0] or s.source}"
+
+
+def _composite_icon() -> QtGui.QIcon:
+    """Three overlapping colour disks, as the merge button in ImSpector."""
+    pix = QtGui.QPixmap(32, 32)
+    pix.fill(Qt.transparent)
+    p = QtGui.QPainter(pix)
+    p.setRenderHint(QtGui.QPainter.Antialiasing)
+    p.setCompositionMode(QtGui.QPainter.CompositionMode_Plus)
+    p.setPen(Qt.NoPen)
+    for color, x, y in (("#ff3030", 11, 12), ("#30ff30", 21, 12), ("#3070ff", 16, 21)):
+        p.setBrush(QtGui.QColor(color))
+        p.drawEllipse(QtCore.QPointF(x, y), 8.5, 8.5)
+    p.end()
+    return QtGui.QIcon(pix)
+
+
+def _swatch(color: QtGui.QColor, w: int = 30, h: int = 14) -> QtGui.QIcon:
+    pix = QtGui.QPixmap(w, h)
+    pix.fill(color)
+    return QtGui.QIcon(pix)
+
+
+def _level(v: float) -> str:
+    return f"{v:.0f}" if abs(v) >= 100 or float(v).is_integer() else f"{v:.4g}"
 
 
 def _stack_tooltip(s: mr.DataStack) -> str:
@@ -374,6 +400,104 @@ class DisplayPanel(QtWidgets.QWidget):
         if self._integer:
             lo, hi = round(lo), max(round(hi), round(lo) + 1)
         self._apply((lo, hi))
+
+
+class CompositePanel(QtWidgets.QGroupBox):
+    """Channels of the composite: on / off, colour and levels; a click picks the channel Min / Max edit."""
+
+    toggled = QtCore.pyqtSignal(int, bool)            # stack position in the file, on
+    colorChanged = QtCore.pyqtSignal(int, QtGui.QColor)
+    activated = QtCore.pyqtSignal(int)
+    autoAll = QtCore.pyqtSignal()
+    COLORS = (("Red", "#ff0000"), ("Green", "#00ff00"), ("Blue", "#0000ff"), ("Cyan", "#00ffff"),
+              ("Magenta", "#ff00ff"), ("Yellow", "#ffff00"), ("Gray", "#ffffff"))
+
+    def __init__(self, parent=None):
+        super().__init__("Composite", parent)
+        self._positions: list[int] = []
+        lay = QtWidgets.QVBoxLayout(self)
+        self.table = QtWidgets.QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Channel", "Colour", "Levels"])
+        self.table.verticalHeader().hide()
+        self.table.verticalHeader().setDefaultSectionSize(24)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table.setFocusPolicy(Qt.NoFocus)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        lay.addWidget(self.table)
+        row = QtWidgets.QHBoxLayout()
+        b_auto = QtWidgets.QPushButton("Auto all")
+        b_auto.setToolTip("0.1 – 99.9 % of the current frame, for every channel")
+        b_auto.clicked.connect(self.autoAll)
+        hint = QtWidgets.QLabel("Min / Max below set the levels of the selected channel")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #9a9a9a;")
+        row.addWidget(b_auto)
+        row.addWidget(hint, 1)
+        lay.addLayout(row)
+        self.table.itemChanged.connect(self._on_item)
+        self.table.cellClicked.connect(lambda r, c: self.activated.emit(self._positions[r]) if c != 1 else None)
+
+    def set_channels(self, rows: list[dict], active: int) -> None:
+        """rows: pos, name, color (QColor), on, lo, hi; *active* is the position being edited."""
+        for r in range(self.table.rowCount()):
+            w = self.table.cellWidget(r, 1)
+            if w is not None:
+                w.hide()  # replaced below; deleteLater only acts once control returns to the event loop
+        self.table.blockSignals(True)
+        self.table.setRowCount(len(rows))
+        self._positions = [r["pos"] for r in rows]
+        bold = QtGui.QFont(self.table.font())
+        bold.setBold(True)
+        for i, r in enumerate(rows):
+            it = QtWidgets.QTableWidgetItem(r["name"])
+            it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked if r["on"] else Qt.Unchecked)
+            if r["pos"] == active:
+                it.setFont(bold)
+            self.table.setItem(i, 0, it)
+            self.table.setCellWidget(i, 1, self._color_button(r["pos"], r["color"]))
+            levels = QtWidgets.QTableWidgetItem(f"{_level(r['lo'])} – {_level(r['hi'])}")
+            levels.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.table.setItem(i, 2, levels)
+        if active in self._positions:
+            self.table.selectRow(self._positions.index(active))
+        self.table.blockSignals(False)
+        rows_shown = min(len(rows), 6)
+        self.table.setFixedHeight(self.table.horizontalHeader().height() + 24 * rows_shown + 4)
+
+    def set_levels(self, pos: int, lo: float, hi: float) -> None:
+        if pos in self._positions:
+            self.table.item(self._positions.index(pos), 2).setText(f"{_level(lo)} – {_level(hi)}")
+
+    def _color_button(self, pos: int, color: QtGui.QColor) -> QtWidgets.QToolButton:
+        b = QtWidgets.QToolButton()
+        b.setIcon(_swatch(color))
+        b.setIconSize(QtCore.QSize(30, 14))
+        b.setAutoRaise(True)
+        b.setToolTip("Colour of this channel")
+        b.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        menu = QtWidgets.QMenu(b)
+        for name, hexcol in self.COLORS:
+            menu.addAction(_swatch(QtGui.QColor(hexcol), 20, 12), name,
+                           lambda c=hexcol: self.colorChanged.emit(pos, QtGui.QColor(c)))
+        menu.addSeparator()
+        menu.addAction("Other…", lambda: self._pick(pos, color))
+        b.setMenu(menu)
+        return b
+
+    def _pick(self, pos: int, color: QtGui.QColor) -> None:
+        c = QtWidgets.QColorDialog.getColor(color, self, "Channel colour")
+        if c.isValid():
+            self.colorChanged.emit(pos, c)
+
+    def _on_item(self, it: QtWidgets.QTableWidgetItem) -> None:
+        if it.column() == 0:
+            self.toggled.emit(self._positions[it.row()], it.checkState() == Qt.Checked)
 
 
 class InfoPanel(QtWidgets.QTreeWidget):
@@ -654,6 +778,15 @@ class FrameControls(QtWidgets.QWidget):
 
     def index(self) -> tuple:
         return tuple(r["slider"].value() for r in self.rows)
+
+    def set_index(self, index: tuple) -> None:
+        """Move the sliders without signals (another stack of the same shape keeps the frame)."""
+        for r, v in zip(self.rows, index):
+            for w, value in ((r["slider"], v), (r["spin"], v + 1)):
+                w.blockSignals(True)
+                w.setValue(value)
+                w.blockSignals(False)
+        self._update_info()
 
     def _on_slider(self, i: int, v: int) -> None:
         spin = self.rows[i]["spin"]
@@ -973,6 +1106,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._hist_skip = 0
         self.tasks: set[Task] = set()
         self.psf = None  # msr_psf.PSFPanel, created when first switched on
+        self.comp_colors: dict[tuple, QtGui.QColor] = {}   # composite colour and on / off per (file, stack)
+        self.comp_on: dict[tuple, bool] = {}
+        self._comp_arrays: dict[tuple, np.ndarray] = {}
+        self._comp_mappers: dict[tuple, IntensityMapper] = {}
         self.linescan_windows: list = []
         self._build_ui()
         self._build_actions()
@@ -1022,11 +1159,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.display = DisplayPanel()
         self.display.changed.connect(lambda: self._render_frame(histogram=False))
         self.display.autoRequested.connect(self._auto_contrast)
+        self.composite = CompositePanel()
+        self.composite.hide()
+        self.composite.toggled.connect(self._composite_toggled)
+        self.composite.colorChanged.connect(self._composite_color)
+        self.composite.activated.connect(self._select_stack)
+        self.composite.autoAll.connect(self._composite_auto_all)
         self.info = InfoPanel()
         self.settings_panel = SettingsPanel()
         self.display.setEnabled(False)
+        display_tab = QtWidgets.QWidget()
+        dl = QtWidgets.QVBoxLayout(display_tab)
+        dl.setContentsMargins(0, 0, 0, 0)
+        dl.addWidget(self.composite)
+        dl.addWidget(self.display, 1)
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.addTab(self.display, "Display")
+        self.tabs.addTab(display_tab, "Display")
         self.tabs.addTab(self.info, "Info")
         self.tabs.addTab(self.settings_panel, "Settings")
 
@@ -1088,6 +1236,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_scalebar = act("Scale &bar", self._toggle_scalebar, "B", tip="Show scale bar (B)")
         self.a_scalebar.setCheckable(True)
         self.a_scalebar.setChecked(True)
+        self.a_composite = QtWidgets.QAction(_composite_icon(), "&Composite", self)
+        self.a_composite.setCheckable(True)
+        self.a_composite.setShortcut(QtGui.QKeySequence("C"))
+        self.a_composite.setToolTip("Merge the channels of the file that have the same size, each with its own colour "
+                                    "and levels (C)")
+        self.a_composite.setStatusTip(self.a_composite.toolTip())
+        self.a_composite.toggled.connect(self._toggle_composite)
         self.a_play = act("&Play / pause", self.frames.toggle_play, "P")
         self.a_prev = act("Previous frame", lambda: self.frames.step(-1), ",")
         self.a_next = act("Next frame", lambda: self.frames.step(1), ".")
@@ -1108,7 +1263,8 @@ class MainWindow(QtWidgets.QMainWindow):
                   self.a_video, self.a_export_ts, None, self.a_close, self.a_quit):
             m.addSeparator() if a is None else m.addAction(a)
         m = mb.addMenu("&View")
-        for a in (self.a_fit, self.a_1to1, self.a_scalebar, None, self.a_play, self.a_prev, self.a_next):
+        for a in (self.a_fit, self.a_1to1, self.a_scalebar, self.a_composite, None, self.a_play, self.a_prev,
+                  self.a_next):
             m.addSeparator() if a is None else m.addAction(a)
         self.tools_menu = mb.addMenu("&Tools")
         self.tools_menu.addAction(self.a_psf)
@@ -1121,8 +1277,8 @@ class MainWindow(QtWidgets.QMainWindow):
         tb.setObjectName("main_toolbar")
         tb.setMovable(False)
         tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        for a in (self.a_open, self.a_export, self.a_video, None, self.a_fit, self.a_1to1, self.a_scalebar, None,
-                  self.a_psf, self.a_linescan):
+        for a in (self.a_open, self.a_export, self.a_video, None, self.a_fit, self.a_1to1, self.a_scalebar,
+                  self.a_composite, None, self.a_psf, self.a_linescan):
             tb.addSeparator() if a is None else tb.addAction(a)
         self.toolbar = tb
 
@@ -1226,11 +1382,13 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.psf is not None:
                 self.psf.clear()
             self.view.clear()
+            self.composite.hide()
         item = self.file_items.pop(key)
         self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(item))
         self.thumbs.pop(key, None)
-        for k in [k for k in self.states if k[0] == key]:
-            del self.states[k]
+        for d in (self.states, self._comp_arrays, self._comp_mappers):
+            for k in [k for k in d if k[0] == key]:
+                del d[k]
         self.files.pop(key).close()
         if not self.files:
             self.center.setCurrentWidget(self.welcome)
@@ -1266,6 +1424,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.info.show_sections(self._file_sections(msr))
         self.settings_panel.set_sources(self._setting_sources(msr, None), msr.labels)
         self.display.setEnabled(False)
+        self.composite.hide()
         self.pixel_label.setText("")
         self.setWindowTitle(f"{os.path.basename(msr.path)} — {APP_NAME}")
 
@@ -1273,6 +1432,10 @@ class MainWindow(QtWidgets.QMainWindow):
         msr = self.files[key]
         s = msr.stacks[pos]
         if self.cur_key != (key, pos):
+            prev = self.files[self.cur_key[0]].stacks[self.cur_key[1]] \
+                if self.cur_key and self.cur_key[0] in self.files else None
+            same = prev is not None and prev.axes == s.axes and prev.shape == s.shape  # another channel
+            index = self.frames.index()
             self.frames.stop()
             self.arr = s.asarray()
             self.cur_key = (key, pos)
@@ -1280,12 +1443,15 @@ class MainWindow(QtWidgets.QMainWindow):
             if st is None:
                 st = self.states[self.cur_key] = _initial_state(self.arr, s)
             self.frames.configure(s, s.axes[:-2], self.arr.shape[:-2])
+            if same:
+                self.frames.set_index(index)
             self.view.pixel_size = s.pixel_size[0]
             self.view.unit = s.units[0] if s.units and s.units[0] else "µm"
             self.display.set_state(st, np.issubdtype(self.arr.dtype, np.integer))
-            self._render_frame(reset=True)
+            self._render_frame(reset=not same, new_stack=True)
         self.center.setCurrentWidget(self.viewer_page)
         self.display.setEnabled(True)
+        self._update_composite_panel()
         self.info.show_sections(self._stack_sections(msr, s, pos))
         self.settings_panel.set_sources(self._setting_sources(msr, s), msr.labels)
         ident = f"{_stack_label(pos, s)} · {s.channel_id}" if s.channel_id else _stack_label(pos, s)
@@ -1293,15 +1459,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # -- rendering ------------------------------------------------------------------
 
-    def _render_frame(self, reset: bool = False, histogram: bool = True) -> None:
+    def _render_frame(self, reset: bool = False, histogram: bool = True, new_stack: bool | None = None) -> None:
         if self.arr is None or self.cur_key is None:
             return
         idx = self.frames.index()
         self.frame = np.asarray(self.arr[idx] if idx else self.arr)
         st = self.states[self.cur_key]
-        img = numpy_to_qimage(self.mapper.map(self.frame, st.lo, st.hi), COLOR_TABLES[st.lut])
+        members = self._composite_members()
+        if members:
+            img = rgb_to_qimage(self._composite_rgb(members, idx))
+            self.composite.set_levels(self.cur_key[1], st.lo, st.hi)
+        else:
+            img = numpy_to_qimage(self.mapper.map(self.frame, st.lo, st.hi), COLOR_TABLES[st.lut])
         self.view.set_pixmap(QtGui.QPixmap.fromImage(img), reset)
-        self._psf_feed(new_stack=reset)
+        self._psf_feed(new_stack=reset if new_stack is None else new_stack)
         if histogram:
             if self.frames.playing and self._hist_skip > 0:
                 self._hist_skip -= 1
@@ -1335,12 +1506,112 @@ class MainWindow(QtWidgets.QMainWindow):
         px, py = s.pixel_size
         if px and py:
             text += f"   ({(ix + 0.5) * px:.2f}, {(iy + 0.5) * py:.2f} µm)"
-        text += f"   value {v:.5g}" if isinstance(v, np.floating) else f"   value {v}"
+        members = self._composite_members()
+        if members:  # every channel of the composite
+            stacks, idx, parts = self.files[self.cur_key[0]].stacks, self.frames.index(), []
+            for k in members:
+                if self.comp_on.get(k, True):
+                    c = self._member_array(k)[idx + (iy, ix)]
+                    name = stacks[k[1]].channel_id.split(":")[0] or stacks[k[1]].source
+                    parts.append(f"{name} {c:.5g}" if isinstance(c, np.floating) else f"{name} {c}")
+            text += "   " + "  ·  ".join(parts)
+        else:
+            text += f"   value {v:.5g}" if isinstance(v, np.floating) else f"   value {v}"
         self.pixel_label.setText(text)
 
     def _toggle_scalebar(self) -> None:
         self.view.show_scalebar = self.a_scalebar.isChecked()
         self.view.viewport().update()
+
+    # -- composite --------------------------------------------------------------------
+
+    def _composite_candidates(self) -> list[tuple]:
+        """(file, stack) keys that can be merged with the current stack: same file, axes and shape."""
+        if self.cur_key is None or self.cur_key[0] not in self.files:
+            return []
+        key, pos = self.cur_key
+        stacks = self.files[key].stacks
+        s = stacks[pos]
+        return [(key, i) for i, t in enumerate(stacks) if t.axes == s.axes and t.shape == s.shape]
+
+    def _composite_members(self) -> list[tuple]:
+        """The merged stacks while Composite is on and there is more than one, else []."""
+        if not self.a_composite.isChecked():
+            return []
+        members = self._composite_candidates()
+        return members if len(members) > 1 else []
+
+    def _member_array(self, k: tuple) -> np.ndarray:
+        if k == self.cur_key and self.arr is not None:
+            return self.arr
+        if k not in self._comp_arrays:
+            self._comp_arrays[k] = self.files[k[0]].stacks[k[1]].asarray()
+        return self._comp_arrays[k]
+
+    def _member_state(self, k: tuple) -> DisplayState:
+        if k not in self.states:
+            self.states[k] = _initial_state(self._member_array(k), self.files[k[0]].stacks[k[1]])
+        return self.states[k]
+
+    def _member_color(self, k: tuple, members: list[tuple]) -> QtGui.QColor:
+        if k not in self.comp_colors:
+            self.comp_colors[k] = QtGui.QColor(COMPOSITE_COLORS[members.index(k) % len(COMPOSITE_COLORS)])
+        return self.comp_colors[k]
+
+    def _composite_layers(self, members: list[tuple], idx: tuple) -> tuple[list, list]:
+        layers, mappers = [], []
+        for k in members:
+            if self.comp_on.get(k, True):
+                arr, st = self._member_array(k), self._member_state(k)
+                layers.append((np.asarray(arr[idx] if idx else arr), st.lo, st.hi,
+                               self._member_color(k, members).getRgb()[:3]))
+                mappers.append(self._comp_mappers.setdefault(k, IntensityMapper()))
+        return layers, mappers
+
+    def _composite_rgb(self, members: list[tuple], idx: tuple) -> np.ndarray:
+        rgb = composite_rgb(*self._composite_layers(members, idx))
+        return rgb if rgb is not None else np.zeros(self.frame.shape + (3,), dtype=np.uint8)
+
+    def _update_composite_panel(self) -> None:
+        members = self._composite_members() if self.center.currentWidget() is self.viewer_page else []
+        self.composite.setVisible(bool(members))
+        self.display.lut.setEnabled(not members)
+        self.display.lut.setToolTip("Composite: each channel has a colour (above)" if members else "")
+        if not members:
+            return
+        stacks = self.files[self.cur_key[0]].stacks
+        rows = []
+        for k in members:
+            st = self._member_state(k)
+            rows.append({"pos": k[1], "name": _stack_label(k[1], stacks[k[1]]), "color": self._member_color(k, members),
+                         "on": self.comp_on.get(k, True), "lo": st.lo, "hi": st.hi})
+        self.composite.set_channels(rows, self.cur_key[1])
+
+    def _toggle_composite(self, on: bool) -> None:
+        self._update_composite_panel()
+        self._render_frame(histogram=False)
+        self._update_actions()
+
+    def _composite_toggled(self, pos: int, on: bool) -> None:
+        self.comp_on[(self.cur_key[0], pos)] = on
+        self._render_frame(histogram=False)
+
+    def _composite_color(self, pos: int, color: QtGui.QColor) -> None:
+        self.comp_colors[(self.cur_key[0], pos)] = color
+        self._update_composite_panel()
+        self._render_frame(histogram=False)
+
+    def _composite_auto_all(self) -> None:
+        idx = self.frames.index()
+        for k in self._composite_members():
+            arr = self._member_array(k)
+            f = np.asarray(arr[idx] if idx else arr)
+            step = max(1, int(math.sqrt(f.size / 1_000_000)))
+            st = self._member_state(k)
+            st.lo, st.hi = _percentiles(f[::step, ::step])
+        self.display.set_state(self.states[self.cur_key], np.issubdtype(self.arr.dtype, np.integer))
+        self._update_composite_panel()
+        self._render_frame(histogram=False)
 
     # -- panels ---------------------------------------------------------------------
 
@@ -1524,11 +1795,15 @@ class MainWindow(QtWidgets.QMainWindow):
         pos = self.cur_key[1]
         s = msr.stacks[pos]
         st = self.states[self.cur_key]
-        img = rgb_to_qimage(render_rgb(self.frame, st.lo, st.hi, st.lut, self.mapper))
+        members = self._composite_members()
+        if members:
+            img = rgb_to_qimage(self._composite_rgb(members, self.frames.index()))
+        else:
+            img = rgb_to_qimage(render_rgb(self.frame, st.lo, st.hi, st.lut, self.mapper))
         img = paint_overlays(img, s.pixel_size[0], self.view.unit, self.view.show_scalebar)
         stem = mr.file_stem(msr.path)
         frame_txt = "_".join(f"{a}{i + 1}" for a, i in zip(s.axes[:-2], self.frames.index()))
-        name = f"{stem}_S{pos + 1}{'_' + frame_txt if frame_txt else ''}.png"
+        name = f"{stem}_{'composite' if members else f'S{pos + 1}'}{'_' + frame_txt if frame_txt else ''}.png"
         start = os.path.join(self.qsettings.value("export_dir", os.path.dirname(msr.path)), name)
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save view as PNG", start, "PNG image (*.png)")
         if path:
@@ -1579,6 +1854,12 @@ class MainWindow(QtWidgets.QMainWindow):
             "stem": f"{stem}_S{pos + 1}_{mr._safe(s.channel_id.split(':')[0] or s.source)}",
             "folder": self.qsettings.value("export_dir", os.path.dirname(msr.path)),
         }
+        members = self._composite_members()
+        if members:  # the video shows the composite as on screen; timing from the selected channel
+            defaults["layers"] = [(msr.stacks[k[1]], self._member_color(k, members).getRgb()[:3],
+                                   self._member_state(k).lo, self._member_state(k).hi)
+                                  for k in members if self.comp_on.get(k, True)]
+            defaults["stem"] = f"{stem}_composite"
         dlg = mv.VideoExportDialog(s, self.arr.shape[:-2], self.frames.index(), self.frames.play_row, defaults, self)
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
@@ -1735,6 +2016,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_video.setEnabled(showing_stack and bool(self.frames.rows) and not busy)
         self.a_psf.setEnabled(showing_stack or self.a_psf.isChecked())
         self.a_linescan.setEnabled(bool(self.files))
+        self.a_composite.setEnabled(showing_stack and len(self._composite_candidates()) > 1)
         self.a_calibrate.setEnabled(showing_stack and not busy
                                     and isinstance(self.files[self.cur_key[0]].stacks[self.cur_key[1]], mt.TIFFStack))
         self.busy.setVisible(busy)

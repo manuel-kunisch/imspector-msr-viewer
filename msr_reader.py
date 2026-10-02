@@ -1085,6 +1085,13 @@ def _safe(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("_") or "stack"
 
 
+def file_stem(path: str) -> str:
+    """File name without folder and extension; '.ome.tif(f)' counts as one extension."""
+    name = os.path.basename(path)
+    m = re.fullmatch(r"(.+?)\.ome\.tiff?", name, flags=re.I)
+    return m.group(1) if m else os.path.splitext(name)[0]
+
+
 def _layout(stacks: list[DataStack], imagej: bool) -> tuple[str, list[int], list[dict]]:
     """Output axes (slowest first), shape and per-stack axis mapping."""
     first = stacks[0]

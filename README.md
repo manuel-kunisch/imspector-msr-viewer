@@ -23,6 +23,8 @@ Bio-Formats rejects these files ("Unknown file format"), so this reads them dire
 - Line scan / correlation on demand (Tools ▸ Line scan): pick stacks (also from different files), compare
   their profiles along a line, Pearson r along the line and over the image, optional sub-pixel alignment;
   per frame or as mean / max projection; plot (PNG/PDF/SVG), CSV and image export
+- TIFF, OME-TIFF and ImageJ TIFF files open next to `.msr` files for the same viewing and analyses (PSF,
+  line scan across both, video, frame times); calibration and frame times are used where the file has them
 
 ## Install
 
@@ -42,14 +44,14 @@ The PSF analysis and the line scan need pyqtgraph; scipy, scikit-image and matpl
 builds `dist\MSR_Viewer_v<version>\MSR_Viewer.exe` and a zip of that folder (PyInstaller, one-folder build, no
 Python needed on the target PC). The script creates its own `.venv-build` from Python 3.12 (py launcher) with the
 packages from requirements.txt, so the exe only contains what the viewer imports: about 320 MB unpacked, mostly
-ffmpeg, Qt and scipy. `-SkipInstall` reuses the venv as it is, `-NoZip` skips the zip. Drop .msr files onto the
-exe or use "Open with".
+ffmpeg, Qt and scipy. `-SkipInstall` reuses the venv as it is, `-NoZip` skips the zip. Drop .msr or TIFF files
+onto the exe or use "Open with".
 
 ## Usage
 
 Viewer:
 
-    python msr_viewer.py [file.msr ...]
+    python msr_viewer.py [file.msr | file.tif ...]
 
 On Windows you can also drop files onto `MSR_Viewer.bat`; adjust its `ENV` line to your conda env.
 Wheel = zoom, drag = pan, double-click = fit, ←/→ = frame, Space = play.
@@ -70,6 +72,14 @@ stacks along it (optionally averaged over a band and normalized), and Pearson r 
 first stack* registers each stack to the first one by cross-correlation of lightly smoothed, Hann-windowed
 images with sub-pixel refinement (within 0.02 px on synthetic shifts; plain phase correlation without a
 window can be off by pixels because of the image edges). Names and colours are editable in the table.
+
+TIFF files (`msr_tiff.py`): every channel of every image series becomes a stack, like the detectors of an
+`.msr`. Pixel size, z step, frame interval, per-frame times and channel names come from the OME-XML, the
+ImageJ metadata (unit, spacing, finterval) or the resolution tags (only cm / mm / µm, a dpi value is not a
+calibration). The exports of this tool come back with all ImSpector metadata and settings. Without any axis
+information the pages are taken as Z slices, as ImageJ and Bio-Formats do. Uncompressed data are
+memory-mapped, also when written page by page as cameras do; LZW / JPEG compressed TIFFs need
+`pip install imagecodecs`. Export all stacks stays an `.msr` function, single TIFF stacks can be saved again.
 
 Export without GUI:
 

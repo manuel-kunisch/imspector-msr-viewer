@@ -2,10 +2,11 @@
 """
 msr_viewer.py -- drag & drop viewer for LaVision BioTec ImSpector (.msr) files.
 
-    python msr_viewer.py [FILE.msr | FOLDER ...]
+    python msr_viewer.py [FILE.msr | FILE.tif | FOLDER ...]
 
-Drop .msr files or folders onto the window (or onto MSR_Viewer.bat in Explorer).
-Parsing and TIFF export are done by msr_reader.py, which must sit next to this file.
+Drop .msr or TIFF files or folders onto the window (or onto MSR_Viewer.bat in Explorer).
+Parsing and TIFF export are done by msr_reader.py, which must sit next to this file;
+TIFF / OME-TIFF / ImageJ files are read by msr_tiff.py into the same kind of stacks.
 
 Playback runs in real time (recorded frame intervals x speed) or at a fixed frame
 rate; File > Export video writes the same as MP4 (msr_video.py).  Tools: PSF analysis
@@ -31,6 +32,7 @@ from PyQt5.QtCore import Qt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import msr_reader as mr  # noqa: E402
+import msr_tiff as mt  # noqa: E402
 import msr_video as mv  # noqa: E402
 from msr_widgets import (COLOR_TABLES, LUTS, ElidedLabel, ImageView, IntensityMapper,  # noqa: E402
                          numpy_to_qimage, paint_overlays, render_rgb, rgb_to_qimage)
@@ -110,7 +112,8 @@ def _initial_state(arr: np.ndarray, stack: mr.DataStack) -> DisplayState:
 def _thumbnail(stack: mr.DataStack, size: int = 200) -> QtGui.QPixmap:
     arr = stack.asarray()
     lead = arr.shape[:-2]
-    frame = np.asarray(arr[(0,) * len(lead)])
+    # first frame, but the middle of a z-stack (the first slice of a bead stack is empty)
+    frame = np.asarray(arr[tuple(n // 2 if a == "Z" else 0 for a, n in zip(stack.axes[:-2], lead))])
     h, w = frame.shape
     step = max(1, int(math.ceil(max(h, w) / (2 * size))))
     f = frame[::step, ::step].astype(np.float32)
@@ -122,6 +125,22 @@ def _thumbnail(stack: mr.DataStack, size: int = 200) -> QtGui.QPixmap:
 
 def _stack_label(pos: int, s: mr.DataStack) -> str:
     return f"S{pos + 1}  {s.channel_id.split(':')[0] or s.source}"
+
+
+def _openable(path: str) -> bool:
+    return path.lower().endswith((".msr",) + mt.TIFF_EXTENSIONS)
+
+
+def _open_file(path: str):
+    """MSRFile for .msr, TIFFFile for .tif / .tiff; any other file as whichever reads it."""
+    if mt.is_tiff(path):
+        return mt.TIFFFile(path)
+    try:
+        return mr.MSRFile(path)
+    except mr.MSRFormatError:
+        if path.lower().endswith(".msr"):
+            raise
+    return mt.TIFFFile(path)
 
 
 def _shape_text(s: mr.DataStack) -> str:
@@ -768,15 +787,18 @@ class OverviewPage(QtWidgets.QWidget):
         ws = ", ".join(ps.get("propset_label", "") for ps in msr.property_sets if ps.get("propset_label"))
         self.title.setText(os.path.basename(msr.path))
         self.title.setToolTip(msr.path)
-        self.subtitle.setText(f"{len(msr.stacks)} stacks{' · workspace ' + ws if ws else ''} · "
+        kind = f"{msr.kind} · " if isinstance(msr, mt.TIFFFile) else ""
+        self.subtitle.setText(f"{kind}{len(msr.stacks)} stacks{' · workspace ' + ws if ws else ''} · "
                               "click a stack to open it")
         self.list.clear()
         for pos, s in enumerate(msr.stacks):
             px = s.pixel_size[0]
-            text = f"{_stack_label(pos, s)}\n{_shape_text(s)}  ({s.axes})\n{s.time}" + (f" · {px:.3g} µm/px" if px else "")
-            it = QtWidgets.QListWidgetItem(QtGui.QIcon(thumbs[pos]), text)
+            extra = " · ".join(x for x in (s.time, f"{px:.3g} µm/px" if px else "") if x)
+            it = QtWidgets.QListWidgetItem(QtGui.QIcon(thumbs[pos]), f"{_stack_label(pos, s)}\n{_shape_text(s)}  "
+                                                                     f"({s.axes})\n{extra}")
             it.setData(Qt.UserRole, pos)
-            it.setToolTip(f"{s.channel_id}\n{s.meta.get('Instrument Mode', '')} · {s.meta.get('Measurement Mode', '')}")
+            modes = " · ".join(x for x in (s.meta.get("Instrument Mode"), s.meta.get("Measurement Mode")) if x)
+            it.setToolTip("\n".join(x for x in (s.channel_id, modes) if x) or s.source)
             self.list.addItem(it)
 
 
@@ -792,14 +814,15 @@ class WelcomePage(QtWidgets.QWidget):
         font.setBold(True)
         p.setFont(font)
         p.setPen(QtGui.QColor(210, 210, 215))
-        p.drawText(r.adjusted(0, -40, 0, -40), Qt.AlignCenter, "Drop .msr files here")
+        p.drawText(r.adjusted(0, -40, 0, -40), Qt.AlignCenter, "Drop .msr or TIFF files here")
         font.setPointSize(10)
         font.setBold(False)
         p.setFont(font)
         p.setPen(QtGui.QColor(140, 140, 146))
         p.drawText(r.adjusted(0, 50, 0, 50), Qt.AlignCenter,
                    "or File ▸ Open… (Ctrl+O)  ·  files or whole folders\n"
-                   "LaVision BioTec ImSpector workspaces: every stack, source and setting")
+                   "LaVision BioTec ImSpector workspaces: every stack, source and setting\n"
+                   "TIFF, OME-TIFF and ImageJ stacks for the same analyses")
 
 
 class DropOverlay(QtWidgets.QWidget):
@@ -829,7 +852,7 @@ class DropOverlay(QtWidgets.QWidget):
         font.setBold(False)
         p.setFont(font)
         p.setPen(QtGui.QColor(170, 195, 230))
-        p.drawText(self.rect().adjusted(0, 70, 0, 70), Qt.AlignCenter, ".msr files or folders")
+        p.drawText(self.rect().adjusted(0, 70, 0, 70), Qt.AlignCenter, ".msr / TIFF files or folders")
 
 
 class Task(QtCore.QThread):
@@ -965,7 +988,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         S = QtWidgets.QStyle
         self.a_open = act("&Open…", self.open_dialog, QtGui.QKeySequence.Open, S.SP_DialogOpenButton,
-                          "Open .msr files (or drop them onto the window)")
+                          "Open .msr or TIFF files (or drop them onto the window)")
         self.a_close = act("&Close file", self.close_current_file, "Ctrl+W", S.SP_DialogCloseButton)
         self.a_export = act("Export all stacks as &OME-TIFF…", lambda: self.export_file(False), "Ctrl+E",
                             S.SP_DialogSaveButton, "Export every stack of the file (OME-TIFF + metadata.json)")
@@ -1022,8 +1045,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def open_dialog(self) -> None:
         start = self.qsettings.value("last_dir", os.path.expanduser("~"))
-        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Open ImSpector files", start,
-                                                          "ImSpector files (*.msr);;All files (*)")
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, "Open ImSpector or TIFF files", start,
+            "ImSpector and TIFF files (*.msr *.tif *.tiff);;ImSpector files (*.msr);;TIFF files (*.tif *.tiff);;"
+            "All files (*)")
         if paths:
             self.open_paths(paths)
 
@@ -1031,8 +1056,12 @@ class MainWindow(QtWidgets.QMainWindow):
         files = []
         for p in paths:
             if os.path.isdir(mr._fs_path(p)):
-                files += sorted(os.path.join(p, f) for f in os.listdir(mr._fs_path(p))
-                                if f.lower().endswith(".msr"))
+                found = sorted(os.path.join(p, f) for f in os.listdir(mr._fs_path(p)) if _openable(f))
+                if len(found) > 40 and QtWidgets.QMessageBox.question(
+                        self, APP_NAME, f"{len(found)} .msr / TIFF files in\n{p}\n\nOpen all of them?") \
+                        != QtWidgets.QMessageBox.Yes:
+                    continue
+                files += found
             elif os.path.isfile(mr._fs_path(p)):
                 files.append(p)
         errors, last = [], None
@@ -1044,7 +1073,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     last = self.file_items[key]
                     continue
                 try:
-                    msr = mr.MSRFile(f)
+                    msr = _open_file(f)
                     if not msr.stacks:
                         msr.close()
                         raise mr.MSRFormatError("no image data found")
@@ -1081,11 +1110,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 thumb = QtGui.QPixmap(200, 200)
                 thumb.fill(QtGui.QColor(60, 30, 30))
             self.thumbs[key][pos] = thumb
-            child = QtWidgets.QTreeWidgetItem([f"{_stack_label(pos, s)}\n{_shape_text(s)}  ·  {s.time}"])
+            child = QtWidgets.QTreeWidgetItem([f"{_stack_label(pos, s)}\n{_shape_text(s)}"
+                                               + (f"  ·  {s.time}" if s.time else "")])
             child.setIcon(0, QtGui.QIcon(thumb))
             child.setData(0, Qt.UserRole, ("stack", key, pos))
             px = s.pixel_size[0]
-            child.setToolTip(0, f"{s.channel_id}  ({s.source})\naxes {s.axes}, {_shape_text(s)}, {s.dtype}"
+            ident = f"{s.channel_id}  ({s.source})" if s.channel_id else s.source
+            child.setToolTip(0, f"{ident}\naxes {s.axes}, {_shape_text(s)}, {s.dtype}"
                              + (f"\n{px:.4g} µm/px" if px else ""))
             top.addChild(child)
         self.tree.addTopLevelItem(top)
@@ -1175,7 +1206,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.display.setEnabled(True)
         self.info.show_sections(self._stack_sections(msr, s, pos))
         self.settings_panel.set_sources(self._setting_sources(msr, s), msr.labels)
-        self.setWindowTitle(f"{_stack_label(pos, s)} · {s.channel_id} — {os.path.basename(msr.path)} — {APP_NAME}")
+        ident = f"{_stack_label(pos, s)} · {s.channel_id}" if s.channel_id else _stack_label(pos, s)
+        self.setWindowTitle(f"{ident} — {os.path.basename(msr.path)} — {APP_NAME}")
 
     # -- rendering ------------------------------------------------------------------
 
@@ -1233,6 +1265,20 @@ class MainWindow(QtWidgets.QMainWindow):
     @staticmethod
     def _file_sections(msr: mr.MSRFile):
         first = msr.stacks[0] if msr.stacks else None
+        stacks = ("Stacks", [(_stack_label(i, s), " · ".join(x for x in (s.channel_id, _shape_text(s), s.time) if x))
+                             for i, s in enumerate(msr.stacks)])
+        warnings = ("Warnings", [(str(i + 1), w) for i, w in enumerate(msr.warnings)])
+        if isinstance(msr, mt.TIFFFile):
+            rows = [("Path", msr.path),
+                    ("Size", f"{os.path.getsize(mr._fs_path(msr.path)) / 1e6:.1f} MB"),
+                    ("Format", msr.version),
+                    ("Software", msr.software),
+                    ("Image series", msr.series_count),
+                    ("Pages", msr.page_count),
+                    ("Stacks", len(msr.stacks)),
+                    ("Metadata", ", ".join(msr.metadata) or "TIFF tags only"),
+                    ("TIFF / ImageJ / OME entries", len(msr.properties))]
+            return [("File", rows), stacks, warnings]
         rows = [("Path", msr.path),
                 ("Size", f"{os.path.getsize(mr._fs_path(msr.path)) / 1e6:.1f} MB"),
                 ("Format version", msr.version),
@@ -1245,11 +1291,7 @@ class MainWindow(QtWidgets.QMainWindow):
             sections.append((f"Workspace '{ps.get('propset_label', '')}'",
                              [("Autosave prefix", ps.get("seq_autosave_prefix")), ("Id", ps.get("propset_id")),
                               ("Settings", len(ps.get("properties", {})))]))
-        sections.append(("Stacks", [(_stack_label(i, s), f"{s.channel_id} · {_shape_text(s)} · {s.time}")
-                                    for i, s in enumerate(msr.stacks)]))
-        if msr.warnings:
-            sections.append(("Warnings", [(str(i + 1), w) for i, w in enumerate(msr.warnings)]))
-        return sections
+        return sections + [stacks, warnings]
 
     @staticmethod
     def _stack_sections(msr: mr.MSRFile, s: mr.DataStack, pos: int):
@@ -1257,13 +1299,20 @@ class MainWindow(QtWidgets.QMainWindow):
         px, py = s.pixel_size
         fov = [s.axis_info(a) for a in "XY"]
         dt = s.time_increment if "T" in s.axes else None
+        tiff = isinstance(s, mt.TIFFStack)
         acq = [("Source", s.source), ("Channel ID", s.channel_id), ("Acquired", m.get("Creation Date", s.time)),
-               ("Instrument mode", m.get("Instrument Mode")), ("Measurement mode", m.get("Measurement Mode")),
-               ("Workspace", f"S{pos + 1} (element {s.index} of the stack array)")]
+               ("Instrument mode", m.get("Instrument Mode")), ("Measurement mode", m.get("Measurement Mode"))]
+        if tiff:
+            frames = {"Z": "Z slices", "T": "time points"}.get(s.assumed)
+            acq += [("Image series", f"{s.series + 1} of {msr.series_count}" + (f"  ({s.name})" if s.name else "")),
+                    ("Frames", f"taken as {frames} (the file has no axis information)" if frames else "")]
+        else:
+            acq.append(("Workspace", f"S{pos + 1} (element {s.index} of the stack array)"))
         geo = [("Axes", " × ".join(f"{n} {a}" for a, n in zip(s.axes, s.shape))),
                ("Data type", s.dtype),
-               ("Pixel size", f"{px:.4g} × {py:.4g} µm" if px and py else ""),
-               ("Field of view", f"{fov[0]['length']:.4g} × {fov[1]['length']:.4g} µm" if all(fov) else "")]
+               ("Pixel size", f"{px:.4g} × {py:.4g} µm" if px and py else "not in the file"),
+               ("Field of view", f"{fov[0]['length']:.4g} × {fov[1]['length']:.4g} µm" if px and py and all(fov)
+                else "")]
         if dt:
             geo.append(("Frame interval", f"{dt * 1000:.3f} ms ({1 / dt:.2f} fps)"))
         if len(s.timestamps) > 1:
@@ -1287,16 +1336,28 @@ class MainWindow(QtWidgets.QMainWindow):
                    ("Note", "the first 14 pixels of each frame hold this BCD time stamp")]
         user = [(k, v) for k, v in m.items() if k in ("First Name", "Last Name", "Email", "Institution",
                                                         "Group", "Description", "Rating")]
-        f = [("Path", msr.path), ("Pixel data offset", f"{s.data_offset:,} bytes"),
-             ("Pixel data size", f"{s.nbytes / 1e6:.2f} MB"), ("Settings in snapshot", len(s.properties)),
-             ("Header parse", s.parse_mode)]
+        if tiff:
+            f = [("Path", msr.path), ("Format", msr.version),
+                 ("Pixel data", s.access + (f" (offset {s.data_offset:,} bytes)" if s.access == "memory-mapped" else "")),
+                 ("Pixel data size", f"{s.nbytes / 1e6:.2f} MB"),
+                 ("ImSpector settings", len(s.properties) if s.properties else "")]
+        else:
+            f = [("Path", msr.path), ("Pixel data offset", f"{s.data_offset:,} bytes"),
+                 ("Pixel data size", f"{s.nbytes / 1e6:.2f} MB"), ("Settings in snapshot", len(s.properties)),
+                 ("Header parse", s.parse_mode)]
         return [("Acquisition", acq), ("Geometry", geo), ("Objective", obj), ("ImSpector display", disp),
                 ("PCO camera", cam), ("User", user), ("File", f)]
 
     @staticmethod
     def _setting_sources(msr: mr.MSRFile, s: mr.DataStack | None):
         sources = []
-        stacks = [(f"{_stack_label(i, t)}  ({t.channel_id}, {t.time})", t.properties) for i, t in enumerate(msr.stacks)]
+        stacks = [(f"{_stack_label(i, t)}  ({', '.join(x for x in (t.channel_id, t.time) if x) or t.source})",
+                   t.properties) for i, t in enumerate(msr.stacks)]
+        if isinstance(msr, mt.TIFFFile):
+            # TIFF stacks have ImSpector settings only when the file is an msr_reader export
+            first = [x for t, x in zip(msr.stacks, stacks) if t is s and t.properties]
+            others = [x for t, x in zip(msr.stacks, stacks) if t is not s and t.properties]
+            return first + [("File metadata  (TIFF tags, ImageJ, OME)", msr.properties)] + others
         if s is not None:
             pos = msr.stacks.index(s)
             sources.append(stacks[pos])
@@ -1334,6 +1395,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if key is None:
             return
         msr = self.files[key]
+        if isinstance(msr, mt.TIFFFile):  # whole-file export is for .msr files
+            return
         start = self.qsettings.value("export_dir", os.path.dirname(msr.path))
         folder = QtWidgets.QFileDialog.getExistingDirectory(
             self, "Export into folder (a '<name>_tiff' subfolder will be created)", start)
@@ -1341,7 +1404,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.qsettings.setValue("export_dir", folder)
         path, lines = msr.path, []
-        out = os.path.join(folder, os.path.splitext(os.path.basename(path))[0] + "_tiff")
+        out = os.path.join(folder, mr.file_stem(path) + "_tiff")
 
         def done(written):
             self._done_box(f"Exported {len(written)} image file(s) + metadata.json to\n{out}", "\n".join(lines), out)
@@ -1354,7 +1417,7 @@ class MainWindow(QtWidgets.QMainWindow):
         msr = self.files[self.cur_key[0]]
         pos = self.cur_key[1]
         s = msr.stacks[pos]
-        stem = os.path.splitext(os.path.basename(msr.path))[0]
+        stem = mr.file_stem(msr.path)
         name = f"{stem}_S{pos + 1}_{mr._safe(s.channel_id.split(':')[0] or s.source)}.ome.tif"
         start = os.path.join(self.qsettings.value("export_dir", os.path.dirname(msr.path)), name)
         path, flt = QtWidgets.QFileDialog.getSaveFileName(self, "Save stack", start,
@@ -1379,7 +1442,7 @@ class MainWindow(QtWidgets.QMainWindow):
         st = self.states[self.cur_key]
         img = rgb_to_qimage(render_rgb(self.frame, st.lo, st.hi, st.lut, self.mapper))
         img = paint_overlays(img, s.pixel_size[0], self.view.unit, self.view.show_scalebar)
-        stem = os.path.splitext(os.path.basename(msr.path))[0]
+        stem = mr.file_stem(msr.path)
         frame_txt = "_".join(f"{a}{i + 1}" for a, i in zip(s.axes[:-2], self.frames.index()))
         name = f"{stem}_S{pos + 1}{'_' + frame_txt if frame_txt else ''}.png"
         start = os.path.join(self.qsettings.value("export_dir", os.path.dirname(msr.path)), name)
@@ -1399,7 +1462,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not s.timestamps:
             QtWidgets.QMessageBox.information(self, APP_NAME, "This stack has no per-frame times.")
             return
-        stem = os.path.splitext(os.path.basename(msr.path))[0]
+        stem = mr.file_stem(msr.path)
         name = f"{stem}_S{pos + 1}_{mr._safe(s.channel_id.split(':')[0] or s.source)}_timestamps.txt"
         start = os.path.join(self.qsettings.value("export_dir", os.path.dirname(msr.path)), name)
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export frame times", start, "Text file (*.txt)")
@@ -1424,7 +1487,7 @@ class MainWindow(QtWidgets.QMainWindow):
         s = msr.stacks[pos]
         st = self.states[self.cur_key]
         self.frames.stop()
-        stem = os.path.splitext(os.path.basename(msr.path))[0]
+        stem = mr.file_stem(msr.path)
         defaults = {
             "real_time": self.frames.mode.currentIndex() == 0, "speed": self.frames.speed.value(),
             "fps": self.frames.fps.value(), "out_fps": int(self.qsettings.value("video_out_fps", 60)),
@@ -1547,8 +1610,9 @@ class MainWindow(QtWidgets.QMainWindow):
         has_file = self._current_file_key() is not None
         showing_stack = self.cur_key is not None and self.center.currentWidget() is self.viewer_page
         busy = bool(self.tasks)
+        is_msr = has_file and not isinstance(self.files[self._current_file_key()], mt.TIFFFile)
         for a in (self.a_export, self.a_export_ij):
-            a.setEnabled(has_file and not busy)
+            a.setEnabled(is_msr and not busy)
         self.a_close.setEnabled(has_file and not busy)
         for a in (self.a_save_stack,):
             a.setEnabled(showing_stack and not busy)
@@ -1589,7 +1653,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def about(self) -> None:
         QtWidgets.QMessageBox.about(
             self, APP_NAME,
-            f"<b>{APP_NAME} {__version__}</b><br>Viewer for LaVision BioTec ImSpector .msr files.<br><br>"
+            f"<b>{APP_NAME} {__version__}</b><br>Viewer for LaVision BioTec ImSpector .msr files<br>"
+            "and TIFF / OME-TIFF / ImageJ stacks.<br><br>"
             f"Reader: msr_reader.py {mr.__version__} (format notes: MSR_FORMAT.md)<br>"
             "Wheel: zoom · drag: pan · double-click: fit<br>"
             "Left/Right: frame · Space: play · F: fit · 1: 100 % · B: scale bar")
@@ -1602,7 +1667,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if mime.hasUrls():
             for url in mime.urls():
                 p = url.toLocalFile()
-                if p and (os.path.isdir(p) or p.lower().endswith(".msr")):
+                if p and (os.path.isdir(p) or _openable(p)):
                     out.append(p)
         return out
 

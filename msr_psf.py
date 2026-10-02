@@ -669,7 +669,7 @@ class PSFPanel(QtWidgets.QWidget):
     def _default_name(self, ext: str) -> str:
         if self.stack is None:
             return f"psf.{ext}"
-        return f"{os.path.splitext(os.path.basename(self.stack.path))[0]}_psf.{ext}"
+        return f"{mr.file_stem(self.stack.path)}_psf.{ext}"
 
     def save_csv(self) -> None:
         if not self.results:

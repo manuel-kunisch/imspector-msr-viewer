@@ -170,7 +170,7 @@ class StackPickerDialog(QtWidgets.QDialog):
         for key, msr in files.items():
             top = QtWidgets.QTreeWidgetItem([os.path.basename(msr.path)])
             self.tree.addTopLevelItem(top)
-            stem = os.path.splitext(os.path.basename(msr.path))[0]
+            stem = mr.file_stem(msr.path)
             for pos, s in enumerate(msr.stacks):
                 px = s.pixel_size[0]
                 label = f"S{pos + 1}  {s.channel_id.split(':')[0] or s.source}"
@@ -616,7 +616,7 @@ class LineScanWindow(QtWidgets.QMainWindow):
 
     def _base_name(self) -> str:
         s = self.channels[0]["stack"]
-        return os.path.join(os.path.dirname(s.path), os.path.splitext(os.path.basename(s.path))[0] + "_linescan")
+        return os.path.join(os.path.dirname(s.path), mr.file_stem(s.path) + "_linescan")
 
     def _meta_rows(self) -> list[list[str]]:
         p0, p1 = self.roi.points()

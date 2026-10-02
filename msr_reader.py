@@ -42,7 +42,7 @@ from typing import Any, Iterator
 
 import numpy as np
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 _U8 = struct.Struct("<B")
 _U16 = struct.Struct("<H")

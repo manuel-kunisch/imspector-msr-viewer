@@ -39,7 +39,7 @@ from msr_widgets import (COLOR_TABLES, COMPOSITE_COLORS, LUTS, ElidedLabel, Imag
                          rgb_to_qimage)
 
 APP_NAME = "MSR Viewer"
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 
 # -----------------------------------------------------------------------------
@@ -1588,6 +1588,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.composite.set_channels(rows, self.cur_key[1])
 
     def _toggle_composite(self, on: bool) -> None:
+        if on and self._composite_members() and self.tabs.currentWidget() is not self.psf:
+            self.tabs.setCurrentIndex(0)  # the channel table is in the Display tab
         self._update_composite_panel()
         self._render_frame(histogram=False)
         self._update_actions()

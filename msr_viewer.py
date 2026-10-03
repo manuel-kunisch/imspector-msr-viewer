@@ -2109,6 +2109,19 @@ class MainWindow(QtWidgets.QMainWindow):
 # application
 # -----------------------------------------------------------------------------
 
+class _Application(QtWidgets.QApplication):
+    """Opens the files the macOS Finder sends (Open With, drop onto the Dock icon) as QFileOpenEvent."""
+
+    window = None
+
+    def event(self, ev) -> bool:
+        if ev.type() == QtCore.QEvent.FileOpen and self.window is not None and ev.file():
+            path = ev.file()
+            QtCore.QTimer.singleShot(0, lambda: self.window.open_paths([path]))
+            return True
+        return super().event(ev)
+
+
 def _dark_palette(app: QtWidgets.QApplication) -> None:
     app.setStyle("Fusion")
     p = QtGui.QPalette()
@@ -2158,7 +2171,7 @@ def main(argv=None) -> int:
     QtWidgets.QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     if hasattr(QtGui.QGuiApplication, "setHighDpiScaleFactorRoundingPolicy"):
         QtGui.QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    app = QtWidgets.QApplication(argv)
+    app = _Application(argv)
     app.setApplicationName(APP_NAME)
     if sys.platform == "win32" and "Segoe UI" in QtGui.QFontDatabase().families():
         app.setFont(QtGui.QFont("Segoe UI", 9))  # Qt5 default is 'MS Shell Dlg 2' 8 pt
@@ -2167,6 +2180,7 @@ def main(argv=None) -> int:
     _install_excepthook()
     win = MainWindow()
     win.show()
+    app.window = win
     paths = [a for a in argv[1:] if not a.startswith("-")]
     if paths:
         QtCore.QTimer.singleShot(0, lambda: win.open_paths(paths))

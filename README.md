@@ -40,7 +40,9 @@ Video export needs ffmpeg: `pip install imageio-ffmpeg` (bundles it) or any ffmp
 The PSF analysis and the line scan need pyqtgraph; scipy, scikit-image and matplotlib are optional
 (Gaussian fit, spline sampling, sub-pixel alignment, plot export).
 
-## Windows exe
+## Standalone apps
+
+Windows:
 
     powershell -ExecutionPolicy Bypass -File build_windows.ps1
 
@@ -49,6 +51,18 @@ Python needed on the target PC). The script creates its own `.venv-build` from P
 packages from requirements.txt, so the exe only contains what the viewer imports: about 320 MB unpacked, mostly
 ffmpeg, Qt and scipy. `-SkipInstall` reuses the venv as it is, `-NoZip` skips the zip. Drop .msr or TIFF files
 onto the exe or use "Open with".
+
+macOS (Apple Silicon), in Terminal on the Mac:
+
+    ./build_macos.sh
+
+builds `dist/MSR Viewer.app` and `dist/MSR_Viewer_AppleSilicon_v<version>.dmg`, in its own `.venv-build-macos`
+from a native arm64 Python 3.10+ (`PYTHON=...` picks one; Xcode command line tools needed, `brew install
+create-dmg` optional for a nicer DMG window). `--skip-install` reuses the venv. The app icon comes from
+`msr_viewer.png` if present (logo at 1024 px for sharp Retina icons), else from `msr_viewer.ico`. The app is
+signed ad hoc only, so macOS asks once: System Settings ▸ Privacy & Security ▸ Open Anyway, or
+`xattr -dr com.apple.quarantine "/Applications/MSR Viewer.app"`. Open With and dropping files onto the Dock
+icon work for .msr and TIFF files.
 
 ## Usage
 

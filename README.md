@@ -3,7 +3,7 @@
 Viewer and TIFF exporter for LaVision BioTec **ImSpector** `.msr` files (ImSpector Pro 7.x, TriM Scope).
 Bio-Formats rejects these files ("Unknown file format"), so this reads them directly. No ImSpector needed.
 
- [!TIP]
+> [!TIP]
 > **Ready-to-run apps, no Python needed:** download them from the
 > [latest release](https://github.com/manuel-kunisch/imspector-msr-viewer/releases/latest).
 >

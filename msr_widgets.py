@@ -345,11 +345,16 @@ class ImageView(QtWidgets.QGraphicsView):
 
     def set_pixmap(self, pix: QtGui.QPixmap, reset: bool) -> None:
         self._item.setPixmap(pix)
+        rect = QtCore.QRectF(0, 0, pix.width(), pix.height())
         if reset or not self._has_image:
-            self._scene.setSceneRect(QtCore.QRectF(0, 0, pix.width(), pix.height()))
+            self._scene.setSceneRect(rect)
             self._has_image = True
             self.fit()
         else:
+            if self._scene.sceneRect() != rect:  # same stack, new size (e.g. a mosaic after stitching)
+                self._scene.setSceneRect(rect)
+                if self._fit_mode:
+                    self.fit()
             self.viewport().update()
 
     def clear(self) -> None:

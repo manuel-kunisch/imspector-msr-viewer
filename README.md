@@ -15,13 +15,17 @@ Bio-Formats rejects these files ("Unknown file format"), so this reads them dire
 > *More info* ▸ *Run anyway* on Windows, System Settings ▸ Privacy & Security ▸ *Open Anyway* on macOS.
 
 
-> **v0.4.0, in development.** Tested so far with ImSpector Pro 7.6.4 files (camera, PMT and resonant
-> scanner timelapse). Other acquisition types may not work yet.
+> **v0.5.0, in development.** Tested so far with ImSpector Pro 7.6.4 files (camera, PMT and resonant
+> scanner timelapse, compressed files, a 3 × 3 mosaic of z-stacks). Other acquisition types may not work yet.
 
 ## Features
 
-- Drag & drop `.msr` files or folders into the viewer
+- Drag & drop `.msr` files or folders into the viewer, also files saved compressed by ImSpector
 - Overview of all stacks in the measurement workspace
+- Mosaics (tile scans) as one image: the tiles placed at their stage positions, or stitched (the overlaps
+  registered by cross-correlation in 2D or 3D, all shifts solved together, inconsistent ones dropped) and
+  blended (linear feathering, average, maximum or none); saved as OME-TIFF / ImageJ TIFF, PNG or as MP4
+  (z sweep or timelapse) like any other stack
 - Zoom/pan, scale bar, LUTs, histogram/contrast, frame slider
 - Composite (View ▸ Composite, C): the channels of a file merged as in ImageJ's composite mode, each with its
   own colour and levels; also for PNG and MP4 export
@@ -43,14 +47,19 @@ Bio-Formats rejects these files ("Unknown file format"), so this reads them dire
 
 ## Install
 
-Python ≥ 3.10 with numpy, tifffile and PyQt5, for example:
+Python ≥ 3.10 with numpy, tifffile and PyQt5, plus pyqtgraph and imageio-ffmpeg for the tools and the
+video export, for example:
 
-    conda create -n msr python=3.12 numpy tifffile pyqt
+    conda create -n msr -c conda-forge python=3.12 numpy tifffile pyqt pyqtgraph imageio-ffmpeg scipy scikit-image matplotlib
 
 Tested with numpy 1.26–2.5, tifffile 2023.4–2026.6 and PyQt5 5.15.
-Video export needs ffmpeg: `pip install imageio-ffmpeg` (bundles it) or any ffmpeg on PATH.
-The PSF analysis and the line scan need pyqtgraph; scipy, scikit-image and matplotlib are optional
-(Gaussian fit, spline sampling, sub-pixel alignment, plot export).
+numpy, tifffile and pyqt are enough to view, stitch and save TIFFs. The PSF analysis and the line scan need
+pyqtgraph (it brings colorama along); video export needs ffmpeg, which imageio-ffmpeg bundles (or any ffmpeg
+on PATH). scipy, scikit-image and matplotlib are optional (Gaussian fit, spline sampling, sub-pixel alignment,
+plot export; scipy also speeds up the stitching filter). An existing environment gets them with
+`conda install -n msr -c conda-forge pyqtgraph imageio-ffmpeg scipy scikit-image matplotlib`.
+Packages installed with `pip install --user` are seen by every environment of the same Python version and can
+hide what an environment itself lacks.
 
 ## Standalone apps
 
@@ -82,11 +91,48 @@ Viewer:
 
     python msr_viewer.py [file.msr | file.tif ...]
 
-On Windows you can also drop files onto `MSR_Viewer.bat`; adjust its `ENV` line to your conda env.
+On Windows you can also drop files onto `MSR_Viewer.bat`. It uses the conda environment named `msr` (in
+`%USERPROFILE%\.conda\envs`, `anaconda3`, `miniconda3`, `miniforge3` or ProgramData), or the one the
+environment variable `MSR_VIEWER_ENV` points to.
 Wheel = zoom, drag = pan, double-click = fit, ←/→ = frame, Space = play.
 Next to the play button you choose *real time* (with a speed factor) or *fixed fps*; File ▸ Export video
 writes the same as MP4. In real time each frame is held for its recorded interval; the file itself has a
 constant frame rate (60 fps by default), so it plays everywhere and the timing is exact to one video frame.
+
+Mosaics: when a file contains the tiles of a mosaic (ImSpector "2D Mosaic", one stack per tile), the viewer
+adds a stack *Mosaic 3 × 3 PMT:0:4* (one per detector) and opens it. The *Mosaic* tab next to *Display*
+switches between
+
+- the **stage positions** recorded by ImSpector (stage +X to the right, +Y up, as in ImSpector; *Detect*
+  tries all eight orientations if another setup differs), and
+- **Stitch**: every overlap of neighbouring tiles is registered (high-pass filtered, so the small structures
+  count and not the background; the best of several cross-correlation peaks by normalised cross-correlation,
+  sub-pixel). *3D: all planes* uses the whole overlap volume of a z-stack (most robust; optionally with a z
+  shift between tiles), *2D* the maximum projection or the plane shown. Overlaps with a correlation below
+  *Min. correlation* are not used. Where a grid step (column c → c + 1) has three or more overlaps, one
+  that is far off the others (more than half the search range, or four robust standard deviations of that
+  step) is dropped: a stage tends to repeat its error for the same move, a false peak in an overlap without
+  structure lands anywhere in the search range. All links are then solved together (weighted least squares; a tile without a usable overlap follows
+  the median error of its grid step, a tile without any overlap stays at its stage position) and links
+  that still disagree by more than 3 px are dropped. The table lists every overlap (shift against the
+  stage, correlation r, used or why not) and every tile.
+
+Blending: linear feathering across the overlap (hides intensity steps at the seams), average, maximum, or
+none (later tiles on top, to inspect the seams). Tiles are placed on whole pixels by default, so every pixel
+outside the overlaps keeps its raw value; *Sub-pixel placement* interpolates instead. *Tile outlines* draws
+the tiles on the image; the status bar names the tile(s) under the cursor. The fused mosaic is composed
+plane by plane from the memory-mapped tiles when shown or saved (≈ 25 ms per 1440 × 1470 plane); the
+planes last used are cached, up to 256 MB per view or export (so a small mosaic like the sample, 90 MB,
+ends up cached as a whole). *Save TIFF*,
+*Video* and *PNG* (or File ▸ Save current stack / Export video) write it as shown, with the layout of the
+moment the export starts; Export all stacks also writes every mosaic next to the tiles. Videos of large
+mosaics can be written at half or quarter size.
+
+On the 3 × 3 sample (10 % overlap) the tiles are up to ≈ 30 px (23 µm) away from their stage positions
+(scan field rotated by ≈ 1.4° against the stage). Stitched in 3D (the default for z-stacks, ≈ 3 s) all
+twelve overlaps are used and agree to within 0.6 px; the 2D maximum projection (0.25 s) uses eight of them
+(three are too weak, one false peak in the empty corner tile is dropped) and places every tile within
+1.3 px of the 3D result.
 
 Composite merges the stacks of a file that have the same axes and size (the detectors of one acquisition, the
 channels of a TIFF), each scaled to its own levels and added in its own colour, as ImageJ does (red, green,
@@ -120,6 +166,8 @@ memory-mapped, also when written page by page as cameras do; LZW / JPEG compress
 
 Export without GUI:
 
+    python msr_mosaic.py file.msr --align        # each mosaic stitched (3D for z-stacks, linear blend) as OME-TIFF
+    python msr_mosaic.py file.msr --info         # only list the mosaics and their tiles (with --align: overlaps)
     python msr_reader.py file.msr                # OME-TIFFs, frame times + metadata.json into file_tiff/
     python msr_reader.py folder --imagej         # every .msr in a folder, as ImageJ hyperstacks
     python msr_reader.py file.msr --timestamps   # only the frame times as text, one per line
@@ -134,6 +182,14 @@ with MSRFile("file.msr") as msr:
     for s in msr.stacks:
         print(s.source, s.axes, s.shape, s.pixel_size)
         data = s.asarray()   # numpy memmap, nothing is loaded until you index it
+
+import msr_mosaic as mm
+
+with MSRFile("mosaic.msr") as msr:
+    for m in mm.find_mosaics(msr):
+        m.set_registration(m.register(mm.RegistrationOptions(source="volume")))  # stitch
+        plane = m.stack.asarray()[10]   # fused plane 10 (linear blend)
+        print(mm.report(m))
 ```
 
 ## How the file is read
@@ -191,8 +247,10 @@ The full byte layout, open questions and why Bio-Formats fails are in [MSR_FORMA
 
 ## Known limitations
 
-- Reverse engineered from one file. Z-stacks, several PMT channels recorded at the same time, FLIM/TCSPC
-  and mosaics are not tested yet.
+- Reverse engineered from two files. Several PMT channels recorded at the same time, FLIM/TCSPC, timelapse
+  mosaics and mosaics with several detectors are not tested yet.
+- Stitching corrects translations only (the tiles of one mosaic share one scan orientation, so their
+  relations are translations); no intensity or flat-field correction besides blending.
 - Only uint16 data seen so far. 8/32-bit data is handled but untested.
-- Some header fields are still unknown (they were zero in all samples). The reader reports them if they
-  are ever non-zero.
+- Some header fields are still unknown (mostly zero; see MSR_FORMAT.md). The reader reports them as
+  `unknown_nonzero` when they are not zero.

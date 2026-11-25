@@ -31,18 +31,21 @@ Python::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import mmap
 import os
 import re
 import struct
 import sys
+import tempfile
+import zlib
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any, ClassVar, Iterator
 
 import numpy as np
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 _U8 = struct.Struct("<B")
 _U16 = struct.Struct("<H")
@@ -99,6 +102,91 @@ def _fs_path(path: str) -> str:
     if p.startswith("\\\\"):  # UNC path \\server\share\...
         return "\\\\?\\UNC\\" + p[2:]
     return "\\\\?\\" + p
+
+
+# -----------------------------------------------------------------------------
+# compressed files
+# -----------------------------------------------------------------------------
+#
+# ImSpector can save a workspace compressed.  Such a file is a 12-byte header and
+# one zlib stream holding the normal archive:
+#
+#     char[3]  "spc"
+#     uint8    1                 container version
+#     uint32   uncompressed size (of the archive)
+#     uint32   Adler-32 of the compressed bytes that follow
+#     zlib stream (78 9C ...)
+#
+# The archive is inflated once into an anonymous temporary file (deleted by the
+# OS when the last handle or memory map is closed, also after a crash), so the
+# pixel data can be memory-mapped like in an uncompressed file.
+
+_SPC_MAGIC = b"spc"
+_SPC_HEADER = struct.Struct("<3sBII")
+
+
+def compressed_header(path: str) -> dict | None:
+    """Header of a compressed ImSpector file ('spc' container), None for a plain archive."""
+    with open(_fs_path(path), "rb") as fh:
+        head = fh.read(_SPC_HEADER.size + 2)
+    if len(head) < _SPC_HEADER.size + 2 or head[:3] != _SPC_MAGIC:
+        return None
+    cmf, flg = head[_SPC_HEADER.size], head[_SPC_HEADER.size + 1]
+    if cmf & 0x0F != 8 or (cmf * 256 + flg) % 31:  # zlib header: deflate, check bits
+        return None
+    _, version, size, checksum = _SPC_HEADER.unpack(head[:_SPC_HEADER.size])
+    return {"container": "spc", "version": version, "size": size, "adler32": checksum}
+
+
+def _inflate(path: str, header: dict, warn):
+    """Inflate the zlib stream of a compressed file into an anonymous temporary file (returned open)."""
+    fout = tempfile.TemporaryFile(prefix="msr_inflated_", suffix=".raw")
+    d = zlib.decompressobj()
+    adler, total, comp = 1, 0, 0
+    try:
+        with open(_fs_path(path), "rb") as fin:
+            fin.seek(_SPC_HEADER.size)
+            while not d.eof:
+                chunk = fin.read(8 << 20)
+                if not chunk:
+                    break
+                comp += len(chunk)
+                adler = zlib.adler32(chunk, adler)
+                data = chunk
+                while data:  # bounded output per call: zeros compress ~1000 : 1
+                    try:
+                        out = d.decompress(data, 64 << 20)
+                    except zlib.error as exc:
+                        raise MSRFormatError(f"{path}: compressed data are corrupt after {total:,} inflated "
+                                             f"bytes ({exc})") from None
+                    fout.write(out)
+                    total += len(out)
+                    data = d.unconsumed_tail
+                    if d.eof:
+                        break
+            if not d.eof:
+                out = d.flush()
+                fout.write(out)
+                total += len(out)
+                if total == 0:
+                    raise MSRFormatError(f"{path}: compressed data are truncated (nothing could be inflated)")
+                warn(f"compressed data end early: the file is incomplete ({total:,} bytes inflated"
+                     + (f" of {header['size']:,})" if header["size"] > total else ")"))
+            rest = fin.read() if d.eof else b""
+            if rest or d.unused_data:
+                adler = zlib.adler32(rest, adler)
+                comp += len(rest)
+                warn(f"{len(d.unused_data) + len(rest)} bytes after the compressed data were ignored")
+        fout.flush()
+    except BaseException:
+        fout.close()
+        raise
+    if d.eof and total % (1 << 32) != header["size"]:
+        warn(f"inflated size {total:,} bytes differs from the size in the header ({header['size']:,})")
+    if d.eof and adler != header["adler32"]:
+        warn(f"Adler-32 of the compressed data is {adler:#010x}, the header says {header['adler32']:#010x}")
+    info = dict(header, compressed_bytes=comp + _SPC_HEADER.size, inflated_bytes=total)
+    return fout, info
 
 
 def _printable(s: str) -> bool:
@@ -347,6 +435,9 @@ class DataStack:
     parse_mode: str = "structured"
     view: ImageView | None = None
     camera_stamp: dict | None = None
+    # open file the pixels are read from instead of *path* (the inflated archive of a compressed file)
+    data_file: Any = field(default=None, repr=False, compare=False)
+    virtual: ClassVar[bool] = False  # True for stacks made from others (msr_mosaic.MosaicStack)
 
     # -- geometry ---------------------------------------------------------
 
@@ -408,12 +499,43 @@ class DataStack:
     def nbytes(self) -> int:
         return _prod(self.sizes) * np.dtype(self.dtype).itemsize
 
+    # -- position and mosaic --------------------------------------------------
+
+    @property
+    def offsets(self) -> list[float] | None:
+        """Physical start of the four stored dimensions (as ImSpector's TIFF export 'Offset_0..3').
+
+        For the tiles of a mosaic, X/Y are the stage position (µm) of the tile.
+        """
+        v = self.header.get("vectors") or []
+        if len(v) >= 3:
+            return [float(v[1][0]), float(v[1][1]), float(v[2][0]), float(v[2][1])]
+        return None
+
+    @property
+    def split_axes(self) -> list[tuple[str, int, int]]:
+        """Loops this stack is one element of: (axis name, index, count), e.g. ('xyz-Table X', 1, 3)."""
+        names = self.header.get("axis_names") or []
+        counts = self.header.get("axis_ints_3") or []
+        index = self.header.get("split_index") or []
+        out = []
+        for k, name in enumerate(names):
+            n = int(counts[k]) if k < len(counts) else 1
+            if name and name.lower() != "none" and n > 1:
+                out.append((name, int(index[k]) if k < len(index) else 0, n))
+        return out
+
     # -- data -------------------------------------------------------------
 
     def asarray(self) -> np.memmap:
         """Pixel data as a read-only memory map with axes :attr:`axes`."""
         full = tuple(int(s) for s in reversed(self.sizes))
-        arr = np.memmap(_fs_path(self.path), dtype=np.dtype(self.dtype).newbyteorder("<"),
+        src = self.data_file
+        if src is None:
+            src = _fs_path(self.path)
+        elif src.closed:
+            raise ValueError(f"{os.path.basename(self.path)} was closed")
+        arr = np.memmap(src, dtype=np.dtype(self.dtype).newbyteorder("<"),
                         mode="r", offset=self.data_offset, shape=full)
         return arr.reshape(self.shape)
 
@@ -474,12 +596,25 @@ class MSRFile:
 
     def __init__(self, path):
         self.path = os.fspath(path)
-        self._fh = open(_fs_path(self.path), "rb")
+        self.warnings: list[str] = []
+        self.compression: dict | None = None  # header and sizes of a compressed ('spc') file
+        self._fh = None
+        self._buf = None
+        self._inflated = None                 # open temporary file holding the inflated archive
+        header = compressed_header(self.path)
         try:
-            self._buf = mmap.mmap(self._fh.fileno(), 0, access=mmap.ACCESS_READ)
-        except ValueError:
-            self._fh.close()
-            raise MSRFormatError(f"{self.path}: empty file") from None
+            if header is not None:
+                self._inflated, self.compression = _inflate(self.path, header, self._warn)
+                self._fh = self._inflated
+            else:
+                self._fh = open(_fs_path(self.path), "rb")
+            try:
+                self._buf = mmap.mmap(self._fh.fileno(), 0, access=mmap.ACCESS_READ)
+            except ValueError:
+                raise MSRFormatError(f"{self.path}: empty file") from None
+        except BaseException:
+            self.close()
+            raise
         self.size = len(self._buf)
         self._ar = _Archive(self._buf)
         self.version: int | None = None
@@ -489,7 +624,6 @@ class MSRFile:
         self.views: list[ImageView] = []
         self.property_sets: list[dict] = []
         self.labels: dict[str, str] = {}
-        self.warnings: list[str] = []
         try:
             self._parse()
         except Exception:
@@ -501,8 +635,9 @@ class MSRFile:
             self._buf.close()
             self._buf = None
         if getattr(self, "_fh", None) is not None:
-            self._fh.close()
+            self._fh.close()  # an inflated temporary file is deleted once no memory map uses it
             self._fh = None
+        self._inflated = None
 
     def __enter__(self):
         return self
@@ -752,7 +887,7 @@ class MSRFile:
 
     def _parse_data_stack(self, cur: _Cursor, index: int, info: _ClassInfo, start: int) -> DataStack:
         s = DataStack(index=index, class_name=info.name, schema=info.schema, offset=start,
-                      path=self.path)
+                      path=self.path, data_file=self._inflated)
         self._read_base_header(cur, s)
         body = cur.pos
         error = None
@@ -810,9 +945,9 @@ class MSRFile:
         h["records"] = [cur.u64() for _ in range(4)]
         h["axis_ints_2"] = [cur.i32() for _ in range(4)]
         raw("h", 16)
-        h["axis_names"] = [cur.cstring(4096) for _ in range(8)]
-        raw("i", 32)
-        h["axis_ints_3"] = [cur.i32() for _ in range(8)]
+        h["axis_names"] = [cur.cstring(4096) for _ in range(8)]  # loops the measurement was split by
+        h["split_index"] = [cur.i32() for _ in range(8)]  # position of this stack in each loop (mosaic tile)
+        h["axis_ints_3"] = [cur.i32() for _ in range(8)]  # length of each loop (e.g. 3, 3 for a 3x3 mosaic)
         raw("j", 36)
         h["int_k"] = cur.i32()  # -1
         raw("l", 16)
@@ -826,6 +961,7 @@ class MSRFile:
         n = cur.i32()
         if not 0 <= n <= 64:
             raise MSRFormatError(f"implausible vector count {n}")
+        # entry 1: offset of X, Y (stage position of a mosaic tile, -FOV/2 for the camera); entry 2: of dims 3, 4
         h["vectors"] = [[cur.f32(), cur.f32()] for _ in range(n)]
         if unknown:
             h["unknown_nonzero"] = unknown
@@ -972,8 +1108,12 @@ class MSRFile:
 
     def summary(self) -> str:
         lines = [f"{os.path.basename(self.path)}: format version {self.version}, "
-                 f"{len(self.properties)} global settings, {len(self.stacks)} data stacks"]
+                 f"{len(self.properties)} global settings, {sum(not s.virtual for s in self.stacks)} data stacks"
+                 + (f", zlib-compressed ({self.compression['compressed_bytes'] / 1e6:.1f} MB -> "
+                    f"{self.compression['inflated_bytes'] / 1e6:.1f} MB)" if self.compression else "")]
         for s in self.stacks:
+            if s.virtual:
+                continue
             px = s.pixel_size[0]
             dt = s.time_increment if "T" in s.axes else None
             lines.append(
@@ -1009,8 +1149,9 @@ class MSRFile:
             "file": os.path.abspath(self.path),
             "reader": f"msr_reader.py {__version__}",
             "format_version": self.version,
+            "compression": self.compression,
             "document": self.document,
-            "stacks": [stack_dict(s) for s in self.stacks],
+            "stacks": [stack_dict(s) for s in self.stacks if not s.virtual],
             "views": [{"index": v.index, "source": v.source, "time": v.time, "meta": v.meta,
                        "header": v.header, "slots": v.slots} for v in self.views],
             "global_settings": self.properties,
@@ -1030,6 +1171,11 @@ _OME_UNITS = {"µm", "um", "nm", "mm", "cm", "m", "pm", "Å"}
 def _geometry(s: DataStack) -> tuple:
     return (s.time, tuple(s.sizes), tuple(round(float(x), 4) for x in s.lengths),
             tuple(s.labels), s.dtype)
+
+
+def _split_position(s: DataStack) -> tuple:
+    """Position of a stack in the loops it was split by (mosaic tile), () for a normal stack."""
+    return tuple((name, index) for name, index, _ in s.split_axes)
 
 
 def _detector(s: DataStack) -> str:
@@ -1053,8 +1199,8 @@ def group_stacks(stacks: list[DataStack], mode: str = "auto") -> tuple[list[list
         if mode != "none" and "C" not in s.axes:
             for members in groups:
                 first = members[0]
-                if _geometry(first) != _geometry(s):
-                    continue
+                if _geometry(first) != _geometry(s) or _split_position(first) != _split_position(s):
+                    continue  # other geometry, or another tile of a mosaic
                 if mode == "auto":
                     if any(_detector(m) == _detector(s) for m in members):
                         notes.append(f"#{s.index} {s.channel_id} has the same geometry and time as "
@@ -1197,7 +1343,8 @@ def export_group(msr: MSRFile, stacks: list[DataStack], path: str, imagej: bool 
         tifffile.imwrite(_fs_path(path), _iter_planes(stacks, axes, shape, mapping), imagej=True,
                          metadata=md, **kwargs)
     else:
-        md = {"axes": axes, "Name": _xml_safe(f"{os.path.basename(msr.path)} #{first.index} {first.source} {first.time}")}
+        ident = f"#{first.index} {first.source}" if not first.virtual else first.channel_id or first.source
+        md = {"axes": axes, "Name": _xml_safe(f"{os.path.basename(msr.path)} {ident} {first.time}")}
         if px and py:
             unit = xunit if xunit in _OME_UNITS else "µm"
             unit = "µm" if unit == "um" else unit
@@ -1235,19 +1382,21 @@ def write_timestamps(stack: DataStack, path: str) -> int:
 
 
 def export(path: str, outdir: str | None = None, imagej: bool = False, group: str = "auto",
-           compression: str | None = None, log=print, timestamps_only: bool = False) -> list[dict]:
+           compression: str | None = None, log=print, timestamps_only: bool = False,
+           msr: "MSRFile | None" = None) -> list[dict]:
     """Convert one .msr file; returns a description of the written files.
 
     Stacks with per-frame times also get a '<name>_timestamps.txt'. With
-    *timestamps_only* only those text files are written.
+    *timestamps_only* only those text files are written.  *msr*: the file already
+    opened (it is not closed; stacks made from others, like fused mosaics, are skipped).
     """
-    with MSRFile(path) as msr:
+    with (contextlib.nullcontext(msr) if msr is not None else MSRFile(path)) as msr:
         stem = os.path.splitext(os.path.basename(path))[0]
         folder = os.path.join(outdir or os.path.dirname(os.path.abspath(path)), f"{stem}_tiff")
         if not timestamps_only:
             os.makedirs(_fs_path(folder), exist_ok=True)
         log(msr.summary())
-        groups, notes = group_stacks(msr.stacks, group)
+        groups, notes = group_stacks([s for s in msr.stacks if not s.virtual], group)
         for note in notes:
             log(f"  note: {note}")
         ext = ".tif" if imagej else ".ome.tif"
@@ -1292,7 +1441,7 @@ def export(path: str, outdir: str | None = None, imagej: bool = False, group: st
         with open(_fs_path(os.path.join(folder, "metadata.json")), "w", encoding="utf-8") as fh:
             json.dump(meta, fh, indent=1, ensure_ascii=False, default=_json_default)
         log(f"  -> metadata.json ({len(msr.properties)} global settings, "
-            f"{sum(len(s.properties) for s in msr.stacks)} per-stack settings)")
+            f"{sum(len(s.properties) for s in msr.stacks if not s.virtual)} per-stack settings)")
         return written
 
 

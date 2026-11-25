@@ -11,6 +11,8 @@ TIFF / OME-TIFF / ImageJ files are read by msr_tiff.py into the same kind of sta
 Playback runs in real time (recorded frame intervals x speed) or at a fixed frame
 rate; File > Export video writes the same as MP4 (msr_video.py).  Tools: PSF analysis
 (msr_psf.py) and line scan / correlation across stacks (msr_linescan.py), on demand.
+Mosaics (tile scans) appear as one more stack, fused from their tiles at the stage
+positions or stitched (msr_mosaic.py, Mosaic tab: msr_stitch.py).
 
 Mouse: wheel = zoom, drag = pan, double-click = fit.
 Keys:  Left/Right = previous/next frame, Home/End = first/last frame, Space = play
@@ -31,7 +33,9 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtCore import Qt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import msr_mosaic as mm  # noqa: E402
 import msr_reader as mr  # noqa: E402
+import msr_stitch as ms  # noqa: E402
 import msr_tiff as mt  # noqa: E402
 import msr_video as mv  # noqa: E402
 from msr_widgets import (COLOR_TABLES, COMPOSITE_COLORS, LUTS, ElidedLabel, ImageView,  # noqa: E402
@@ -39,7 +43,7 @@ from msr_widgets import (COLOR_TABLES, COMPOSITE_COLORS, LUTS, ElidedLabel, Imag
                          rgb_to_qimage)
 
 APP_NAME = "MSR Viewer"
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 
 # -----------------------------------------------------------------------------
@@ -125,7 +129,36 @@ def _thumbnail(stack: mr.DataStack, size: int = 200) -> QtGui.QPixmap:
 
 
 def _stack_label(pos: int, s: mr.DataStack) -> str:
+    if isinstance(s, mm.MosaicStack):
+        return s.mosaic.title
     return f"S{pos + 1}  {s.channel_id.split(':')[0] or s.source}"
+
+
+def _file_part(pos: int, s: mr.DataStack) -> str:
+    """Stack name for file names: 'S3_PMT' or 'mosaic_PMT_0_4_stitched'."""
+    if isinstance(s, mm.MosaicStack):
+        m = s.mosaic
+        return f"mosaic_{mr._safe(m.detector)}_{'stitched' if m.layout == 'aligned' else 'stage'}"
+    return f"S{pos + 1}_{mr._safe(s.channel_id.split(':')[0] or s.source)}"
+
+
+def _frozen(s: mr.DataStack) -> mr.DataStack:
+    """For work in another thread: a mosaic fixed to its current layout (other stacks as they are)."""
+    return s.mosaic.frozen_stack() if isinstance(s, mm.MosaicStack) else s
+
+
+def _add_mosaics(msr) -> list:
+    """Append a fused stack for every mosaic of an .msr file to its stacks."""
+    if not isinstance(msr, mr.MSRFile):
+        return []
+    try:
+        mosaics = mm.find_mosaics(msr)
+    except Exception as exc:  # a broken mosaic must not keep the file from opening
+        msr._warn(f"mosaic not assembled: {type(exc).__name__}: {exc}")
+        return []
+    for m in mosaics:
+        msr.stacks.append(m.stack)
+    return mosaics
 
 
 def _composite_icon() -> QtGui.QIcon:
@@ -1111,6 +1144,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._comp_arrays: dict[tuple, np.ndarray] = {}
         self._comp_mappers: dict[tuple, IntensityMapper] = {}
         self.linescan_windows: list = []
+        self.mosaics: dict[str, list] = {}       # file key -> msr_mosaic.Mosaic objects
+        self._outline_items: list = []
         self._build_ui()
         self._build_actions()
         for w in self.findChildren(QtWidgets.QWidget):
@@ -1167,6 +1202,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.composite.autoAll.connect(self._composite_auto_all)
         self.info = InfoPanel()
         self.settings_panel = SettingsPanel()
+        self.mosaic_panel = ms.MosaicPanel()
+        self.mosaic_panel.changed.connect(self._mosaic_changed)
+        self.mosaic_panel.outlinesToggled.connect(lambda _: self._update_outlines())
+        self.mosaic_panel.taskStarted.connect(self._track_task)
+        self.mosaic_scroll = QtWidgets.QScrollArea()
+        self.mosaic_scroll.setWidgetResizable(True)
+        self.mosaic_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.mosaic_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.mosaic_scroll.setWidget(self.mosaic_panel)
         self.display.setEnabled(False)
         display_tab = QtWidgets.QWidget()
         dl = QtWidgets.QVBoxLayout(display_tab)
@@ -1256,6 +1300,12 @@ class MainWindow(QtWidgets.QMainWindow):
                               tip="Profiles of several stacks along a line, alignment and correlation (own window)")
         self.a_calibrate = act("&Calibration…", self.edit_calibration,
                                tip="Pixel size, z step and frame interval of a TIFF stack that lacks them")
+        self.a_mosaic_tiff = act("Save TIFF…", self.save_stack,
+                                 tip="The fused mosaic as shown (layout and blending) as OME-TIFF or ImageJ TIFF")
+        self.a_mosaic_video = act("Video…", self.export_video,
+                                  tip="Z sweep (or timelapse) of the fused mosaic as MP4")
+        self.a_mosaic_png = act("PNG…", self.save_png, tip="The current plane of the fused mosaic, as shown (PNG)")
+        self.mosaic_panel.add_output_actions([self.a_mosaic_tiff, self.a_mosaic_video, self.a_mosaic_png])
 
         mb = self.menuBar()
         m = mb.addMenu("&File")
@@ -1322,12 +1372,16 @@ class MainWindow(QtWidgets.QMainWindow):
                     errors.append(f"{os.path.basename(f)}:\n    {exc}")
                     continue
                 self.files[key] = msr
+                self.mosaics[key] = _add_mosaics(msr)
                 last = self._add_file_item(key, msr)
                 self.qsettings.setValue("last_dir", os.path.dirname(os.path.abspath(f)))
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
         if last is not None:
-            self.tree.setCurrentItem(last.child(0) if last.childCount() else last)
+            key = last.data(0, Qt.UserRole)[1]
+            stacks = self.files[key].stacks
+            first = next((i for i, s in enumerate(stacks) if isinstance(s, mm.MosaicStack)), 0)  # a mosaic first
+            self.tree.setCurrentItem(last.child(first) if last.childCount() else last)
             self.view.setFocus()
         if errors:
             QtWidgets.QMessageBox.warning(self, APP_NAME, "Could not open:\n\n" + "\n\n".join(errors))
@@ -1368,13 +1422,31 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return it.data(0, Qt.UserRole)[1]
 
+    def _exporting(self) -> bool:
+        """An export (not just a registration) is running."""
+        reg = self.mosaic_panel.thread
+        return any(t is not reg for t in self.tasks)
+
+    def _stop_registration(self) -> None:
+        """Cancel a running registration and wait for it (it stops after the current overlap)."""
+        thread = self.mosaic_panel.thread
+        if thread is not None and thread.isRunning():
+            thread.cancel()
+            QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                thread.wait(30000)
+            finally:
+                QtWidgets.QApplication.restoreOverrideCursor()
+            QtWidgets.QApplication.processEvents()
+
     def close_current_file(self) -> None:
         key = self._current_file_key()
         if key is None:
             return
-        if self.tasks:
+        if self._exporting():
             QtWidgets.QMessageBox.information(self, APP_NAME, "Please wait until the export has finished.")
             return
+        self._stop_registration()
         if self.cur_key and self.cur_key[0] == key:
             self.frames.stop()
             self.frames.configure(self.files[key].stacks[0], "", ())
@@ -1383,6 +1455,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.psf.clear()
             self.view.clear()
             self.composite.hide()
+        if self.mosaic_panel.mosaic is not None and self.mosaic_panel.mosaic in self.mosaics.get(key, []):
+            self._show_mosaic_tab(None)
+            self.mosaic_panel.set_mosaic(None)
+        self.mosaics.pop(key, None)
+        self._update_outlines()
         item = self.file_items.pop(key)
         self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(item))
         self.thumbs.pop(key, None)
@@ -1425,6 +1502,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings_panel.set_sources(self._setting_sources(msr, None), msr.labels)
         self.display.setEnabled(False)
         self.composite.hide()
+        self._show_mosaic_tab(None)
         self.pixel_label.setText("")
         self.setWindowTitle(f"{os.path.basename(msr.path)} — {APP_NAME}")
 
@@ -1452,6 +1530,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.center.setCurrentWidget(self.viewer_page)
         self.display.setEnabled(True)
         self._update_composite_panel()
+        self._show_mosaic_tab(s.mosaic if isinstance(s, mm.MosaicStack) else None, key)
+        self._update_outlines()
         self.info.show_sections(self._stack_sections(msr, s, pos))
         self.settings_panel.set_sources(self._setting_sources(msr, s), msr.labels)
         ident = f"{_stack_label(pos, s)} · {s.channel_id}" if s.channel_id else _stack_label(pos, s)
@@ -1517,6 +1597,10 @@ class MainWindow(QtWidgets.QMainWindow):
             text += "   " + "  ·  ".join(parts)
         else:
             text += f"   value {v:.5g}" if isinstance(v, np.floating) else f"   value {v}"
+        if isinstance(self.arr, mm.MosaicArray):
+            tiles = self.arr.coverage(iy, ix, self.frames.index())
+            m = self.arr.mosaic
+            text += ("   tile " + " + ".join(m.tile_label(k) for k in tiles)) if tiles else "   (no tile)"
         self.pixel_label.setText(text)
 
     def _toggle_scalebar(self) -> None:
@@ -1615,6 +1699,90 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_composite_panel()
         self._render_frame(histogram=False)
 
+    # -- mosaics -----------------------------------------------------------------------
+
+    def _show_mosaic_tab(self, mosaic, key: str | None = None) -> None:
+        """Mosaic tab next to Display / Info / Settings while a mosaic is shown."""
+        i = self.tabs.indexOf(self.mosaic_scroll)
+        if mosaic is None:
+            if i >= 0:
+                self.tabs.removeTab(i)
+            if not self.mosaic_panel.busy:
+                self.mosaic_panel.set_mosaic(None)
+            return
+        first = i < 0
+        if first:
+            i = self.tabs.insertTab(1, self.mosaic_scroll, "Mosaic")
+        if self.mosaic_panel.mosaic is not mosaic:
+            self.mosaic_panel.set_mosaic(mosaic, self.mosaics.get(key, []), self.frames.index)
+            first = True
+        if first and self.tabs.currentWidget() is not self.psf:
+            self.tabs.setCurrentWidget(self.mosaic_scroll)
+
+    def _mosaic_changed(self, mosaic) -> None:
+        """Layout, blending or registration of a mosaic changed: refresh what shows it."""
+        key = next((k for k, group in self.mosaics.items() if mosaic in group), None)
+        if key is None or key not in self.files:
+            return
+        stacks = self.files[key].stacks
+        pos = next((i for i, t in enumerate(stacks) if t is mosaic.stack), None)
+        for k in [k for k in self._comp_arrays if k[0] == key and k[1] == pos]:
+            del self._comp_arrays[k]
+        if pos is not None:
+            thumb = _thumbnail(mosaic.stack)
+            self.thumbs[key][pos] = thumb
+            item = self.file_items[key].child(pos)
+            item.setIcon(0, QtGui.QIcon(thumb))
+            item.setText(0, f"{_stack_label(pos, mosaic.stack)}\n{_shape_text(mosaic.stack)}"
+                         + (f"  ·  {mosaic.stack.time}" if mosaic.stack.time else ""))
+            item.setToolTip(0, _stack_tooltip(mosaic.stack))
+        showing = self.center.currentWidget() is self.viewer_page
+        if pos is not None and self.cur_key == (key, pos) and self.arr is not None and showing:
+            old = self.arr.shape
+            index = self.frames.index()
+            self.arr = mosaic.stack.asarray()
+            if self.arr.shape[:-2] != old[:-2]:  # z range changed (tiles shifted in z)
+                self.frames.configure(mosaic.stack, mosaic.stack.axes[:-2], self.arr.shape[:-2])
+                self.frames.set_index(tuple(min(i, n - 1) for i, n in zip(index, self.arr.shape[:-2])))
+            self._update_composite_panel()
+            self._render_frame(new_stack=True)
+            self._update_outlines()
+            self.info.show_sections(self._stack_sections(self.files[key], mosaic.stack, pos))
+        elif pos is not None and self.cur_key == (key, pos) and self.arr is not None:
+            self.arr = self.frame = None  # reloaded by _show_stack when it is shown again
+            self.cur_key = None
+        elif self.cur_key and self.cur_key[0] == key and showing:
+            self._update_composite_panel()
+            self._render_frame(histogram=False)
+        self._update_actions()
+
+    def _update_outlines(self) -> None:
+        for it in self._outline_items:
+            self.view.scene().removeItem(it)
+        self._outline_items = []
+        if not (isinstance(self.arr, mm.MosaicArray) and self.mosaic_panel.outlines.isChecked()
+                and self.center.currentWidget() is self.viewer_page):
+            return
+        m = self.arr.mosaic
+        pen = QtGui.QPen(QtGui.QColor(255, 200, 40, 220), 0)
+        pen.setCosmetic(True)
+        font = QtGui.QFont(self.font())
+        font.setBold(True)
+        for k, (x, y, w, h) in enumerate(self.arr.tile_rects()):
+            rect = self.view.scene().addRect(QtCore.QRectF(x, y, w, h), pen)
+            rect.setZValue(5)
+            label = self.view.scene().addSimpleText(f"{m.tile_label(k)}  S{m.tiles[k].pos + 1}", font)
+            label.setBrush(QtGui.QColor(255, 200, 40))
+            label.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations)
+            label.setPos(x + 4, y + 4)
+            label.setZValue(6)
+            self._outline_items += [rect, label]
+
+    def _track_task(self, thread) -> None:
+        self.tasks.add(thread)
+        thread.finished.connect(lambda: (self.tasks.discard(thread), self._update_actions()))
+        self._update_actions()
+
     # -- panels ---------------------------------------------------------------------
 
     @staticmethod
@@ -1634,11 +1802,16 @@ class MainWindow(QtWidgets.QMainWindow):
                     ("Metadata", ", ".join(msr.metadata) or "TIFF tags only"),
                     ("TIFF / ImageJ / OME entries", len(msr.properties))]
             return [("File", rows), stacks, warnings]
+        comp = msr.compression
+        mosaics = [s for s in msr.stacks if isinstance(s, mm.MosaicStack)]
         rows = [("Path", msr.path),
                 ("Size", f"{os.path.getsize(mr._fs_path(msr.path)) / 1e6:.1f} MB"),
+                ("Compression", f"zlib ('spc' container), {comp['inflated_bytes'] / 1e6:.1f} MB inflated "
+                                "into a temporary file" if comp else "none"),
                 ("Format version", msr.version),
                 ("Software", first.meta.get("VersionNr") if first else ""),
-                ("Data stacks", len(msr.stacks)),
+                ("Data stacks", len(msr.stacks) - len(mosaics)),
+                ("Mosaics", ", ".join(s.mosaic.title for s in mosaics)),
                 ("Display views", len(msr.views)),
                 ("Global settings", len(msr.properties))]
         sections = [("File", rows)]
@@ -1693,6 +1866,16 @@ class MainWindow(QtWidgets.QMainWindow):
                    ("Note", "the first 14 pixels of each frame hold this BCD time stamp")]
         user = [(k, v) for k, v in m.items() if k in ("First Name", "Last Name", "Email", "Institution",
                                                         "Group", "Description", "Rating")]
+        if isinstance(s, mm.MosaicStack):
+            mo = s.mosaic
+            acq[-1] = ("Workspace", f"fused from {len(mo.tiles)} stacks: "
+                                    + ", ".join(f"S{t.pos + 1}" for t in mo.tiles))
+            mos = [(k[len("Mosaic "):].capitalize() if k != "Mosaic" else "Tiles", v)
+                   for k, v in m.items() if k.startswith("Mosaic")]
+            f = [("Path", msr.path), ("Pixel data", "composed from the tiles when shown or saved"),
+                 ("Size when saved", f"{s.nbytes / 1e6:.2f} MB"), ("Settings", "snapshot of the first tile")]
+            return [("Acquisition", acq), ("Mosaic", mos), ("Geometry", geo), ("Objective", obj),
+                    ("User", user), ("File", f)]
         if tiff:
             f = [("Path", msr.path), ("Format", msr.version),
                  ("Pixel data", s.access + (f" (offset {s.data_offset:,} bytes)" if s.access == "memory-mapped" else "")),
@@ -1762,11 +1945,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.qsettings.setValue("export_dir", folder)
         path, lines = msr.path, []
         out = os.path.join(folder, mr.file_stem(path) + "_tiff")
+        mosaics = []  # the fused mosaics as they are shown now (copies fixed to this layout)
+        for i, s in enumerate(msr.stacks):
+            if isinstance(s, mm.MosaicStack):
+                name = (f"M{len(mosaics) + 1:02d}_{_file_part(i, s)}_{s.mosaic.blend}"
+                        + (".tif" if imagej else ".ome.tif"))
+                mosaics.append((name, _frozen(s)))
+
+        def work():
+            written = mr.export(path, folder, imagej=imagej, log=lines.append, msr=msr)  # no second inflate
+            for name, s in mosaics:
+                rec = mr.export_group(msr, [s], os.path.join(out, name), imagej=imagej)
+                lines.append(f"  -> {name}  ({s.mosaic.title}, {s.meta.get('Mosaic layout')}) "
+                             f"axes={rec['axes']} shape={'x'.join(map(str, rec['shape']))}")
+                written.append(rec)
+            return written
 
         def done(written):
             self._done_box(f"Exported {len(written)} image file(s) + metadata.json to\n{out}", "\n".join(lines), out)
 
-        self._run_task(lambda: mr.export(path, folder, imagej=imagej, log=lines.append), done, "Export")
+        self._run_task(work, done, "Export")
 
     def save_stack(self) -> None:
         if self.cur_key is None or self.center.currentWidget() is not self.viewer_page:
@@ -1775,9 +1973,10 @@ class MainWindow(QtWidgets.QMainWindow):
         pos = self.cur_key[1]
         s = msr.stacks[pos]
         stem = mr.file_stem(msr.path)
-        name = f"{stem}_S{pos + 1}_{mr._safe(s.channel_id.split(':')[0] or s.source)}.ome.tif"
+        name = f"{stem}_{_file_part(pos, s)}.ome.tif"
         start = os.path.join(self.qsettings.value("export_dir", os.path.dirname(msr.path)), name)
-        path, flt = QtWidgets.QFileDialog.getSaveFileName(self, "Save stack", start,
+        title = "Save mosaic" if isinstance(s, mm.MosaicStack) else "Save stack"
+        path, flt = QtWidgets.QFileDialog.getSaveFileName(self, title, start,
                                                           "OME-TIFF (*.ome.tif);;ImageJ TIFF (*.tif)")
         if not path:
             return
@@ -1785,7 +1984,8 @@ class MainWindow(QtWidgets.QMainWindow):
         base = re.sub(r"(\.ome)?\.tiff?$", "", path, flags=re.I)
         path = base + (".tif" if imagej else ".ome.tif")
         self.qsettings.setValue("export_dir", os.path.dirname(path))
-        self._run_task(lambda: mr.export_group(msr, [s], path, imagej=imagej),
+        frozen = _frozen(s)
+        self._run_task(lambda: mr.export_group(msr, [frozen], path, imagej=imagej),
                        lambda rec: self._done_box(f"Saved {os.path.basename(path)}\naxes {rec['axes']}, "
                                                   f"shape {' × '.join(map(str, rec['shape']))}", "",
                                                   os.path.dirname(path)), "Saving")
@@ -1805,7 +2005,8 @@ class MainWindow(QtWidgets.QMainWindow):
         img = paint_overlays(img, s.pixel_size[0], self.view.unit, self.view.show_scalebar)
         stem = mr.file_stem(msr.path)
         frame_txt = "_".join(f"{a}{i + 1}" for a, i in zip(s.axes[:-2], self.frames.index()))
-        name = f"{stem}_{'composite' if members else f'S{pos + 1}'}{'_' + frame_txt if frame_txt else ''}.png"
+        part = "composite" if members else (_file_part(pos, s) if isinstance(s, mm.MosaicStack) else f"S{pos + 1}")
+        name = f"{stem}_{part}{'_' + frame_txt if frame_txt else ''}.png"
         start = os.path.join(self.qsettings.value("export_dir", os.path.dirname(msr.path)), name)
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save view as PNG", start, "PNG image (*.png)")
         if path:
@@ -1853,12 +2054,13 @@ class MainWindow(QtWidgets.QMainWindow):
             "real_time": self.frames.mode.currentIndex() == 0, "speed": self.frames.speed.value(),
             "fps": self.frames.fps.value(), "out_fps": int(self.qsettings.value("video_out_fps", 60)),
             "scalebar": self.view.show_scalebar, "lut": st.lut, "lo": st.lo, "hi": st.hi,
-            "stem": f"{stem}_S{pos + 1}_{mr._safe(s.channel_id.split(':')[0] or s.source)}",
+            "stem": f"{stem}_{_file_part(pos, s)}",
             "folder": self.qsettings.value("export_dir", os.path.dirname(msr.path)),
         }
         members = self._composite_members()
+        s = _frozen(s)
         if members:  # the video shows the composite as on screen; timing from the selected channel
-            defaults["layers"] = [(msr.stacks[k[1]], self._member_color(k, members).getRgb()[:3],
+            defaults["layers"] = [(_frozen(msr.stacks[k[1]]), self._member_color(k, members).getRgb()[:3],
                                    self._member_state(k).lo, self._member_state(k).hi)
                                   for k in members if self.comp_on.get(k, True)]
             defaults["stem"] = f"{stem}_composite"
@@ -2002,7 +2204,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _update_actions(self) -> None:
         has_file = self._current_file_key() is not None
         showing_stack = self.cur_key is not None and self.center.currentWidget() is self.viewer_page
-        busy = bool(self.tasks)
+        busy = self._exporting()  # a running registration blocks nothing; exports use a fixed copy
         is_msr = has_file and not isinstance(self.files[self._current_file_key()], mt.TIFFFile)
         for a in (self.a_export, self.a_export_ij):
             a.setEnabled(is_msr and not busy)
@@ -2021,7 +2223,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_composite.setEnabled(showing_stack and len(self._composite_candidates()) > 1)
         self.a_calibrate.setEnabled(showing_stack and not busy
                                     and isinstance(self.files[self.cur_key[0]].stacks[self.cur_key[1]], mt.TIFFStack))
-        self.busy.setVisible(busy)
+        showing_mosaic = showing_stack and isinstance(self.files[self.cur_key[0]].stacks[self.cur_key[1]],
+                                                      mm.MosaicStack)
+        self.a_mosaic_tiff.setEnabled(showing_mosaic and not busy)
+        self.a_mosaic_video.setEnabled(showing_mosaic and bool(self.frames.rows) and not busy)
+        self.a_mosaic_png.setEnabled(showing_mosaic)
+        self.busy.setFormat("exporting…" if busy else "registering…")
+        self.busy.setVisible(bool(self.tasks))
 
     def _tree_menu(self, pos) -> None:
         item = self.tree.itemAt(pos)
@@ -2052,7 +2260,7 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.about(
             self, APP_NAME,
             f"<b>{APP_NAME} {__version__}</b><br>Viewer for LaVision BioTec ImSpector .msr files<br>"
-            "and TIFF / OME-TIFF / ImageJ stacks.<br><br>"
+            "and TIFF / OME-TIFF / ImageJ stacks, compressed files and mosaics (stitching).<br><br>"
             f"Reader: msr_reader.py {mr.__version__} (format notes: MSR_FORMAT.md)<br>"
             "Wheel: zoom · drag: pan · double-click: fit<br>"
             "Left/Right: frame · Space: play · F: fit · 1: 100 % · B: scale bar")
@@ -2093,10 +2301,11 @@ class MainWindow(QtWidgets.QMainWindow):
             QtCore.QTimer.singleShot(0, lambda: self.open_paths(paths))
 
     def closeEvent(self, ev) -> None:
-        if self.tasks:
+        if self._exporting():
             QtWidgets.QMessageBox.information(self, APP_NAME, "Please wait until the export has finished.")
             ev.ignore()
             return
+        self._stop_registration()
         self.qsettings.setValue("geometry", self.saveGeometry())
         self.frames.stop()
         self.arr = self.frame = None

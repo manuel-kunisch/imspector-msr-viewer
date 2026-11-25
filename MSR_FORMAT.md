@@ -1,7 +1,26 @@
 # LaVision BioTec ImSpector `.msr` — file format notes
 
 Reverse-engineered from `reso_scan_ao25_um_oscillation_4hz_5V_closed_loop_limit_compensation_timelapse.msr`
-(ImSpector Pro 7.6.4, TriM Scope). Implemented in `msr_reader.py`.
+and `mosaic_10_perc_overlap_403um_fov.msr` (compressed, 3 × 3 mosaic of z-stacks) (ImSpector Pro 7.6.4,
+TriM Scope). Implemented in `msr_reader.py` (file) and `msr_mosaic.py` (mosaics).
+
+## 0. Compressed files
+
+ImSpector can save a workspace compressed. Such a file is a 12-byte header and one zlib stream that holds
+the archive described below (byte for byte what an uncompressed file contains):
+
+```
+char[3]  "spc"
+uint8    1                     container version
+uint32   uncompressed size     of the archive (113 894 005 in the sample)
+uint32   Adler-32              of the compressed bytes that follow (not of the archive)
+zlib stream                    78 9C ..., ends with the Adler-32 of the archive (big-endian, as zlib does)
+```
+
+`msr_reader.py` inflates the stream once into an anonymous temporary file (removed by the OS when the
+last handle or memory map of it closes, also after a crash) and memory-maps the pixels from there. The
+sample (85 MB → 114 MB) opens in about a second. Bio-Formats and the previous reader rejected these files,
+since they start with `spc` instead of the archive's version number.
 
 ## 1. Container: MFC `CArchive`
 
@@ -79,17 +98,19 @@ int32×8  1
 uint64×4 ?
 int32×4  1
 16 B     0
-CString×8 "None"                   axis names of the scan setup
-32 B     0
-int32×8  1
-36 B     0
+CString×8 "None"                   loops the measurement was split by ("xyz-Table X", "xyz-Table Y", ...)
+int32×8  0                         index of this stack in each loop (mosaic tile: column, row)
+int32×8  1                         length of each loop (3, 3 for a 3 × 3 mosaic)
+36 B     0                         mosaic sample: float32 4.0 in the first 4 bytes of the first tile only
 int32    -1
-16 B     0
+16 B     0                         mosaic sample: int32 1 in the last 4 bytes of every tile
 CString×4 units                    "µm", "µm", "s", ""
 44 B     0
 int32 n, float32[n]                per-frame acquisition time in s (timelapse: 250 values, 16.41 ms apart)
 8 B      0
-int32 n, (float32,float32)[n]      n = 3; entry 1 = XY offset in µm (camera: -FOV/2; meaning unconfirmed)
+int32 n, (float32,float32)[n]      n = 3; entries 1 and 2 = offset of the four dimensions (X, Y; dim3,
+                                   dim4), as ImSpector's TIFF export writes them (Offset_0..3): the stage
+                                   position of a mosaic tile in µm, -FOV/2 for the camera, the z start
 
 -- data array --
 CString  channel id      "PMT[1]:0:4:0"  (device[copy]:?:detector:?)
@@ -109,7 +130,7 @@ property list            (343 … 1670 CProperty entries)
 header layout differs (other ImSpector versions), it falls back to finding the data array by
 structure (channel id, then plausible sizes, lengths and labels, then this self-check).
 
-The blocks marked `0` were zero in all four stacks. Their meaning is unknown; the reader reports
+The blocks marked `0` were zero in all stacks of the first sample. Their meaning is unknown; the reader reports
 them as `unknown_nonzero` if they are ever non-zero.
 
 Camera stacks from PCO cameras contain the camera's BCD timestamp in the first 14 pixels of every frame
@@ -151,7 +172,26 @@ markers (e.g. `0x8003`, an MFC reference to "class #3", which presumably matched
 directly with the stack) instead of MFC's index bookkeeping, so it would not parse this layout even if
 detection were forced.
 
-## 8. Open questions (need more sample files)
+## 8. Mosaics
 
-* Files with Z-stacks, several simultaneous PMT channels, FLIM/TCSPC, mosaics, other data types.
+A mosaic ("Measurement Mode" `2D Mosaic` in the metadata) is stored as one `CDataStack` per tile, named
+`PMT - xyz-Table[row] - xyz-Table[column]` (outer loop first), with channel ids `PMT:0:4:0` … `PMT:0:4:8`
+(last field: running tile number). Per tile the header gives the loop indices (`split_index`, see §4),
+the loop lengths and the stage position (offset vector); the snapshot settings repeat the mosaic setup:
+`xyz-Table XRes/YRes` (tiles), `XWidth/YWidth` (tile size, µm), `XOvl/YOvl` (overlap, µm), `XYOvl` (%),
+`XPosMin/XPosMax`, `YPosMin/YPosMax` (stage positions of the first and last tile; `YLen` negative: rows
+step towards −Y).
+
+In the sample (3 × 3 tiles of 512 × 512 × 22, 0.7886 µm/px, 10 % overlap) the tiles fit together with stage
++X to the right and stage +Y up (row 0 at the top): of the eight ways to map the stage axes onto the image,
+only this one makes all twelve overlaps correlate. The actual overlaps differ from the stage positions by up
+to 25 px (≈ 20 µm): the scan field is rotated by ≈ 1.4° against the stage axes (every column step also
+moves ≈ 10.5 px down, every row step ≈ 12 px left), and the step from column 1 to 2 is ≈ 30 px shorter
+than the one from column 0 to 1. `msr_mosaic.py` registers the overlaps to correct this.
+
+## 9. Open questions (need more sample files)
+
+* Files with several simultaneous PMT channels, FLIM/TCSPC, other data types.
+* Other values of the `spc` container version; files above 4 GB (the size field is 32 bits).
+* Mosaics with several detectors, timelapse mosaics, mosaics that use `xyz-Table FlipXAxis / FlipYAxis`.
 * Meaning of the `:a:b:c` parts of the channel id, the `uint64×4` block, and the time-axis length.

@@ -175,7 +175,7 @@ class VideoSettings:
     speed: float = 1.0        # real time: 0.5 = twice as slow
     out_fps: float = 60.0     # real time: output frame rate
     fps: float = 25.0         # fixed frame rate
-    scale: int = 1            # integer upscaling (nearest neighbour)
+    scale: float = 1          # 2, 3, 4: upscaling (nearest neighbour); 0.5, 0.25: downscaling (mean of 2x2, 4x4)
     scalebar: bool = True
     label: bool = True        # time (or z) stamp in the corner
     lut: str = "Gray"
@@ -220,7 +220,12 @@ class FrameRenderer:
         else:
             rgb = render_rgb(np.asarray(self.arr[tuple(idx)]), self.s.lo, self.s.hi, self.s.lut, self.mapper)
         if self.s.scale > 1:
-            rgb = np.repeat(np.repeat(rgb, self.s.scale, axis=0), self.s.scale, axis=1)
+            f = int(round(self.s.scale))
+            rgb = np.repeat(np.repeat(rgb, f, axis=0), f, axis=1)
+        elif self.s.scale < 1:
+            f = int(round(1 / self.s.scale))
+            h, w = rgb.shape[0] // f * f, rgb.shape[1] // f * f
+            rgb = rgb[:h, :w].reshape(h // f, f, w // f, f, 3).mean(axis=(1, 3)).round().astype(np.uint8)
         text = self.label(i)
         if (self.s.scalebar and self.per_px) or text:
             rgb = qimage_to_rgb(paint_overlays(rgb_to_qimage(rgb), self.per_px, self.unit, self.s.scalebar, text))
@@ -342,9 +347,18 @@ class VideoExportDialog(QtWidgets.QDialog):
 
         self.scale = QtWidgets.QComboBox()
         h, w = stack.shape[-2:]
+        if max(h, w) > 1024:  # large images (mosaics): smaller videos
+            for f, text in ((4, "¼"), (2, "½")):
+                if max(h, w) // f >= 256:
+                    self.scale.addItem(f"{text}×  ({w // f} × {h // f} px)", 1.0 / f)
         for f in (1, 2, 3, 4):
             self.scale.addItem(f"{f}×  ({w * f} × {h * f} px)", f)
-        self.scale.setCurrentIndex(max(0, min(3, int(np.ceil(512 / max(h, w))) - 1)))
+        if max(h, w) > 2048:
+            self.scale.setCurrentIndex(self.scale.findData(0.5))
+        else:
+            self.scale.setCurrentIndex(self.scale.findData(max(1, min(4, int(np.ceil(512 / max(h, w)))))))
+        self.scale.setToolTip("Video size; large mosaics can be written at half or quarter size "
+                              "(mean of 2 × 2 or 4 × 4 pixels)")
         form.addRow("Size", self.scale)
 
         ov = QtWidgets.QHBoxLayout()
@@ -465,7 +479,7 @@ class VideoExportDialog(QtWidgets.QDialog):
         return VideoSettings(
             path=path, axis=self.axis.currentIndex(), first=self.first.value() - 1, last=self.last.value() - 1,
             real_time=self.real.isChecked(), speed=self.speed.value(), out_fps=float(self.out_fps.currentData()),
-            fps=float(self.fps.value()), scale=int(self.scale.currentData()), scalebar=self.scalebar.isChecked(),
+            fps=float(self.fps.value()), scale=float(self.scale.currentData()), scalebar=self.scalebar.isChecked(),
             label=self.label.isChecked(), lut=self.defaults.get("lut", "Gray"),
             lo=float(self.defaults.get("lo", 0.0)), hi=float(self.defaults.get("hi", 1.0)),
             layers=list(self.defaults.get("layers", [])))

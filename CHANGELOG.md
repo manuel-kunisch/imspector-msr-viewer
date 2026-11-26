@@ -2,6 +2,13 @@
 
 Ready-to-run apps for each version: [releases](https://github.com/manuel-kunisch/imspector-msr-viewer/releases).
 
+## Unreleased
+
+- Greyed-out menu entries are drawn grey in the dark theme. Before, a white shadow made them look brighter
+  than the active ones (e.g. the header and *All N channels* in the Composite menu).
+- Line scan: the tooltip of *Align to first stack* says cross-correlation, as the code does it.
+- README: a line scan screenshot (170 nm beads), and all screenshots in the app's dark theme.
+
 ## v0.6.0 (2026-11-26): 3D view
 
 ![The 3D view with Composite on: the channel menu of the Composite button and the channel rows of the 3D tab](docs/3d_composite.png)

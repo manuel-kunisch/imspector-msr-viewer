@@ -3071,6 +3071,9 @@ def _dark_palette(app: QtWidgets.QApplication) -> None:
     p.setColor(QtGui.QPalette.HighlightedText, c(255, 255, 255))
     for role in (QtGui.QPalette.Text, QtGui.QPalette.ButtonText, QtGui.QPalette.WindowText):
         p.setColor(QtGui.QPalette.Disabled, role, c(115, 115, 120))
+    # Fusion etches disabled menu text: a copy in Light, 1 px down-right.  Left white, that made greyed-out
+    # entries look brighter than active ones on the dark background.
+    p.setColor(QtGui.QPalette.Disabled, QtGui.QPalette.Light, c(0, 0, 0, 0))
     app.setPalette(p)
     app.setStyleSheet("QToolTip { color: #e6e6e6; background-color: #323236; border: 1px solid #55555a; }")
 

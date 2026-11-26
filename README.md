@@ -15,7 +15,7 @@ Bio-Formats rejects these files ("Unknown file format"), so this reads them dire
 > *More info* ▸ *Run anyway* on Windows, System Settings ▸ Privacy & Security ▸ *Open Anyway* on macOS.
 
 
-> **v0.6.0, in development.** Tested so far with ImSpector Pro 7.6.4 files (camera, PMT and resonant
+> **v0.6.1, in development.** Tested so far with ImSpector Pro 7.6.4 files (camera, PMT and resonant
 > scanner timelapse, compressed files, a 3 × 3 mosaic of z-stacks). Other acquisition types may not work yet.
 > What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 

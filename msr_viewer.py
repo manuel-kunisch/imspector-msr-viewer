@@ -45,7 +45,7 @@ from msr_widgets import (COLOR_TABLES, COMPOSITE_COLORS, LUTS, ElidedLabel, Imag
                          rgb_to_qimage)
 
 APP_NAME = "MSR Viewer"
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 # LUTs that run from black to one colour: a 3D channel takes that colour (the others become its lookup table)
 RAMP_LUTS = ("Gray", "Green", "Magenta", "Red", "Cyan", "Yellow")
 VOLUME_HINT = "3D view · drag: rotate · Shift+drag: move · wheel: zoom"

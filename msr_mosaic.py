@@ -46,7 +46,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import msr_reader as mr  # noqa: E402
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 BLEND_MODES = {
     "linear": "Linear blend (feather across the overlap)",

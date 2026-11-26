@@ -6,7 +6,7 @@ repeated acquisitions, ...).  A separate window shows them as composite or one
 by one; the line ROI gives the intensity profile of every stack along it
 (averaged over a band of parallel lines), and the Pearson correlation between
 the stacks along the line and over the whole image.  Stacks can be aligned to
-the first one by phase correlation (sub-pixel).  Timelapses and z-stacks are
+the first one by cross-correlation (sub-pixel).  Timelapses and z-stacks are
 scanned per frame or as mean / maximum projection.
 
 Concepts ported from OME-Tiff-PSF-Evaluator-V2/multichannel_linescan_correlation_app.py.
@@ -366,7 +366,8 @@ class LineScanWindow(QtWidgets.QMainWindow):
         self.width_spin.setSuffix(" px")
         self.width_spin.setToolTip("Average the profile over parallel lines on both sides")
         self.align = QtWidgets.QCheckBox("Align to first stack")
-        self.align.setToolTip("Phase correlation (sub-pixel) of every stack against the first one, per image")
+        self.align.setToolTip("Cross-correlation (smoothed, Hann window, sub-pixel) of every stack against the "
+                              "first one, per image")
         self.align.setEnabled(len(self.channels) > 1)
         self.normalize = QtWidgets.QCheckBox("Normalize profiles")
         self.normalize.setToolTip("Divide each profile by its maximum")

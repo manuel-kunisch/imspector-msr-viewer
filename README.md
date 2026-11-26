@@ -46,7 +46,7 @@ Bio-Formats rejects these files ("Unknown file format"), so this reads them dire
 - Pixel data is exported bit-exact, no rescaling
 - PSF analysis on demand (Tools ▸ PSF analysis): click a bead, get lateral x/y and (for z-stacks) axial
   widths at FWHM, 1/e or 1/e², from the threshold crossings and a Gaussian fit
-- Line scan / correlation on demand (Tools ▸ Line scan): pick stacks (also from different files), compare
+- Line scan / correlation on demand (Tools ▸ Line scan / correlation…): pick stacks (also from different files), compare
   their profiles along a line, Pearson r along the line and over the image, optional sub-pixel alignment;
   per frame or as mean / max projection; plot (PNG/PDF/SVG), CSV and image export
 - TIFF, OME-TIFF and ImageJ TIFF files open next to `.msr` files for the same viewing and analyses (PSF,
@@ -162,12 +162,18 @@ optionally averaged over parallel lines and rotated. Widths are measured above a
 a movable background box, or zero); for z-stacks the axial profile is the mean of a small box in every slice.
 Results can be copied or saved as CSV / PNG.
 
-Line scan / correlation first asks which stacks to compare (same X × Y size), then opens its own window: a
-composite (or one stack at a time) with a line whose ends and centre can be dragged, the profiles of all
-stacks along it (optionally averaged over a band and normalized), and Pearson r for every pair. *Align to
-first stack* registers each stack to the first one by cross-correlation of lightly smoothed, Hann-windowed
-images with sub-pixel refinement (within 0.02 px on synthetic shifts; plain phase correlation without a
-window can be off by pixels because of the image edges). Names and colours are editable in the table.
+Line scan / correlation (Tools ▸ Line scan / correlation…, Ctrl+Shift+L) first asks which stacks to compare
+(same X × Y size), then opens its own window: a composite (or one stack at a time) with a line whose ends and
+centre can be dragged, the profiles of all stacks along it (optionally averaged over a band and normalized),
+and Pearson r for every pair. *Align to first stack* registers each stack to the first one by
+cross-correlation of lightly smoothed, Hann-windowed images with sub-pixel refinement (within 0.02 px on
+synthetic shifts; plain phase correlation without a window can be off by pixels because of the image edges).
+Names and colours are editable in the table. Z-stacks and timelapses are scanned in one frame or in the mean
+or maximum projection of each stack. *Save plot…* writes PNG, PDF or SVG, *Export CSV…* the profiles with the
+line and the settings, *Save image…* the view with the line and a scale bar. Below, two 170 nm beads 3.9 µm
+apart in a z-stack of 101 planes with 17 nm pixels, scanned in the mean projection over ± 6 px:
+
+![Line scan through two 170 nm beads in the mean projection of a z-stack: the line with its averaging band, the profile in µm, and the controls](docs/linescan.png)
 
 TIFF files (`msr_tiff.py`): every channel of every image series becomes a stack, like the detectors of an
 `.msr`. Pixel size, z step, frame interval, per-frame times and channel names come from the OME-XML, the

@@ -15,7 +15,7 @@ Bio-Formats rejects these files ("Unknown file format"), so this reads them dire
 > *More info* ▸ *Run anyway* on Windows, System Settings ▸ Privacy & Security ▸ *Open Anyway* on macOS.
 
 
-> **v0.5.0, in development.** Tested so far with ImSpector Pro 7.6.4 files (camera, PMT and resonant
+> **v0.6.0, in development.** Tested so far with ImSpector Pro 7.6.4 files (camera, PMT and resonant
 > scanner timelapse, compressed files, a 3 × 3 mosaic of z-stacks). Other acquisition types may not work yet.
 
 ## Features
@@ -29,6 +29,9 @@ Bio-Formats rejects these files ("Unknown file format"), so this reads them dire
 - Zoom/pan, scale bar, LUTs, histogram/contrast, frame slider
 - Composite (View ▸ Composite, C): the channels of a file merged as in ImageJ's composite mode, each with its
   own colour and levels; also for PNG and MP4 export
+- 3D view (View ▸ 3D view, 3) of z-stacks and 3D mosaics: interactive volume rendering on the graphics card,
+  a Python port of the renderer of the Fiji plugin [3Dscript](https://github.com/bene51/3Dscript); per channel
+  colour or lookup table, min / max, gamma and weight, three rendering algorithms, view presets, PNG snapshots
 - Timelapse playback in real time (the recorded frame intervals, × speed) or at a fixed frame rate
 - All metadata: pixel size, frame timestamps, objective and every ImSpector setting (filter, compare two stacks)
 - Export to OME-TIFF or ImageJ TIFF with physical pixel size and frame times, plus a `metadata.json`
@@ -53,8 +56,8 @@ video export, for example:
     conda create -n msr -c conda-forge python=3.12 numpy tifffile pyqt pyqtgraph imageio-ffmpeg scipy scikit-image matplotlib
 
 Tested with numpy 1.26–2.5, tifffile 2023.4–2026.6 and PyQt5 5.15.
-numpy, tifffile and pyqt are enough to view, stitch and save TIFFs. The PSF analysis and the line scan need
-pyqtgraph (it brings colorama along); video export needs ffmpeg, which imageio-ffmpeg bundles (or any ffmpeg
+numpy, tifffile and pyqt are enough to view (also in 3D), stitch and save TIFFs. The PSF analysis and the line
+scan need pyqtgraph (it brings colorama along); video export needs ffmpeg, which imageio-ffmpeg bundles (or any ffmpeg
 on PATH). scipy, scikit-image and matplotlib are optional (Gaussian fit, spline sampling, sub-pixel alignment,
 plot export; scipy also speeds up the stitching filter). An existing environment gets them with
 `conda install -n msr -c conda-forge pyqtgraph imageio-ffmpeg scipy scikit-image matplotlib`.
@@ -191,6 +194,77 @@ with MSRFile("mosaic.msr") as msr:
         plane = m.stack.asarray()[10]   # fused plane 10 (linear blend)
         print(mm.report(m))
 ```
+
+## 3D view
+
+View ▸ 3D view (key 3, or *3D view* in the toolbar) shows the current z-stack or 3D mosaic as a volume. Every
+pixel of the view casts a ray through the stack on the graphics card (orthographic ray casting), a Python port
+of the renderer of the Fiji plugin 3Dscript (see below). While Composite is on, the active channels of the
+composite are shown together; otherwise the stack the 2D view shows. The button stays on while 2D-only stacks
+are shown, and the next z-stack opens in 3D again. Other axes such as time are chosen with the sliders below
+the view as in 2D. The Z slider is off, because all planes are shown.
+
+Mouse and keys in the view:
+
+- drag: rotate (the front of the volume follows the mouse; with Alt or Ctrl about one axis only)
+- Shift+drag or middle-button drag: move
+- wheel: zoom about the cursor (wheel up zooms in, as in 2D); + / −: zoom
+- arrow keys: rotate by 5° (Shift: 1°); R or Home: the oblique 3D view; F: fit; B: scale bar
+
+The *3D* tab next to *Display*:
+
+- **Channels**: visibility and colour per channel: a colour, or one of the lookup tables Fire, Viridis, HiLo
+  and Inverted. A channel starts with its colour in 2D (composite colour or LUT) and its 2D Min / Max. Click a
+  channel to edit its contrast.
+- **Contrast**: the histogram of the whole volume with the transfer function. Drag the yellow lines to set
+  Min / Max, or drag between them to move the window. Below Min a voxel is black and transparent; towards Max
+  it gets its full colour and becomes opaque. Gamma (brightness curve), Weight, and the buttons Auto (0.1–99.9 %
+  of the volume, Shift+click: all channels), Full, 2D (the Min / Max of the 2D view) and Reset.
+- **Rendering**: algorithm, sampling (samples per voxel along each ray: Fast, Normal, Fine), background
+  colour, bounding box, scale bar and axes.
+- **View**: the presets 3D (oblique, from above the front), XY (as the 2D view), XZ, YZ and Fit; the rotation
+  angles (3Dscript's Euler angles) and the zoom.
+- **Volume**: the resolution on the graphics card; *Save PNG…* (also File ▸ Save view as PNG) and *Copy image*
+  render the view at full quality with its overlays.
+
+Rendering algorithms, as in 3Dscript:
+
+- **Independent transparency**: every channel is composited front to back with its own opacity, so a channel
+  in front does not hide another channel behind it.
+- **Combined transparency**: the opacities of all channels add up along the ray, so the first structure in
+  front hides what lies behind it, whatever its channel.
+- **Maximum intensity**: the brightest value along each ray. The XY view is the same as a maximum projection
+  of the stack.
+
+The volume is read in the background (progress and Cancel in the 3D tab). After Cancel, or when it could not
+be loaded, the view stays empty (it does not show the previous stack instead) and *Reload* in the 3D tab tries
+again; only a change of the resolution keeps the volume shown, at its resolution. With resolution *Auto*, a
+channel larger than 64 M voxels is averaged down in x and y (in z only if needed). *Full* keeps every voxel, up to the texture size limit of the graphics card and at most 512 M voxels
+per channel and 1 G over all channels (beyond that x and y are averaged further; the 3D tab says "capped");
+½ and ¼ are faster on large stacks. While the view moves it is drawn coarser, then once at full quality. When
+3D is switched off, a volume of up to 1 GB stays loaded, so it is back at once; a larger one is released.
+
+Not in this version yet: editing the opacity curve (it follows Min / Max with gamma 2, as 3Dscript starts),
+lighting, cropping, animations (3Dscript's scripting) and perspective projection.
+
+The 3D view needs OpenGL 3.3 (3.0 is accepted), which every graphics driver of the last decade provides
+(macOS: OpenGL 4.1). Where OpenGL is missing or too old, for example over remote desktop or in a virtual
+machine, the viewer says so when 3D is switched on. On Windows, the environment variable
+`MSR_VIEWER_SOFTWARE_GL=1` then selects Qt's software renderer (Mesa llvmpipe, OpenGL 3.0), for example
+`set MSR_VIEWER_SOFTWARE_GL=1` before starting `MSR_Viewer.exe`. It runs on the processor and is much slower
+than a graphics card (often 10–100 times: fine for small stacks and occasional use). It works in the packaged
+Windows app and with PyQt5 from pip, which include it (`opengl32sw.dll`). conda-forge's Qt is built for desktop
+OpenGL only and ignores the variable (Anaconda's own Qt honours it only in an activated environment), and
+macOS has no software renderer.
+
+**Acknowledgement.** The 3D view is a port of the interactive renderer of 3Dscript by Benjamin Schmid,
+<https://github.com/bene51/3Dscript>, used under the BSD 2-Clause License (full text in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), also shown by Help ▸ Third-party notices in the viewer and
+the app). If you use the 3D view, please cite:
+
+> Schmid B, Tripal P, Fraaß T, Kersten C, Ruder B, Grüneboom A, Huisken J, Palmisano R. 3Dscript: animating
+> 3D/4D microscopy data using a natural-language-based syntax. *Nat Methods* 16, 278–280 (2019).
+> <https://doi.org/10.1038/s41592-019-0359-1>
 
 ## How the file is read
 

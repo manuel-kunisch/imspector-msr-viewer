@@ -12,11 +12,13 @@ Playback runs in real time (recorded frame intervals x speed) or at a fixed fram
 rate; File > Export video writes the same as MP4 (msr_video.py).  Tools: PSF analysis
 (msr_psf.py) and line scan / correlation across stacks (msr_linescan.py), on demand.
 Mosaics (tile scans) appear as one more stack, fused from their tiles at the stage
-positions or stitched (msr_mosaic.py, Mosaic tab: msr_stitch.py).
+positions or stitched (msr_mosaic.py, Mosaic tab: msr_stitch.py).  View > 3D view shows
+z-stacks and 3D mosaics as a volume (msr_volume*.py, after the Fiji plugin 3Dscript;
+OpenGL, loaded on demand).
 
 Mouse: wheel = zoom, drag = pan, double-click = fit.
 Keys:  Left/Right = previous/next frame, Home/End = first/last frame, Space = play
-       (while the image has focus); F = fit, 1 = 100 %, B = scale bar.
+       (while the image has focus); F = fit, 1 = 100 %, B = scale bar, 3 = 3D view.
 """
 
 from __future__ import annotations
@@ -43,7 +45,11 @@ from msr_widgets import (COLOR_TABLES, COMPOSITE_COLORS, LUTS, ElidedLabel, Imag
                          rgb_to_qimage)
 
 APP_NAME = "MSR Viewer"
-__version__ = "0.5.0"
+__version__ = "0.6.0"
+# LUTs that run from black to one colour: a 3D channel takes that colour (the others become its lookup table)
+RAMP_LUTS = ("Gray", "Green", "Magenta", "Red", "Cyan", "Yellow")
+VOLUME_HINT = "3D view · drag: rotate · Shift+drag: move · wheel: zoom"
+KEEP_VOLUME_BYTES = 2 ** 30        # a 3D volume up to this size stays loaded while 3D is off
 
 
 # -----------------------------------------------------------------------------
@@ -176,6 +182,32 @@ def _composite_icon() -> QtGui.QIcon:
     return QtGui.QIcon(pix)
 
 
+def _volume_icon() -> QtGui.QIcon:
+    """A wire-frame cube, for the 3D view."""
+    pix = QtGui.QPixmap(32, 32)
+    pix.fill(Qt.transparent)
+    p = QtGui.QPainter(pix)
+    p.setRenderHint(QtGui.QPainter.Antialiasing)
+    front = QtCore.QRectF(5.5, 11.5, 16, 16)
+    back = front.translated(6, -6)
+    p.setPen(QtGui.QPen(QtGui.QColor(120, 170, 255), 1.6))
+    p.drawRect(back)
+    for a, b in ((front.topLeft(), back.topLeft()), (front.topRight(), back.topRight()),
+                 (front.bottomRight(), back.bottomRight())):
+        p.drawLine(a, b)
+    p.setPen(QtGui.QPen(QtGui.QColor(225, 225, 230), 2.0))
+    p.setBrush(QtGui.QColor(120, 170, 255, 70))
+    p.drawRect(front)
+    p.end()
+    return QtGui.QIcon(pix)
+
+
+def _z_planes(s: mr.DataStack) -> int:
+    """Number of Z planes of a stack (0 without a Z axis)."""
+    zi = s.axes[:-2].find("Z")
+    return int(s.shape[zi]) if zi >= 0 else 0
+
+
 def _swatch(color: QtGui.QColor, w: int = 30, h: int = 14) -> QtGui.QIcon:
     pix = QtGui.QPixmap(w, h)
     pix.fill(color)
@@ -215,6 +247,14 @@ def _shape_text(s: mr.DataStack) -> str:
 def _app_icon() -> QtGui.QIcon:
     """Window and taskbar icon, 16-256 px; the same file is the exe icon (msr_viewer.spec)."""
     return QtGui.QIcon(os.path.join(os.path.dirname(os.path.abspath(__file__)), "msr_viewer.ico"))
+
+
+def _resource(name: str) -> str | None:
+    """Path of a file shipped next to msr_viewer.py (the app bundle's resources when frozen), None if missing."""
+    dirs = [os.path.dirname(os.path.abspath(__file__)), getattr(sys, "_MEIPASS", "")]
+    if getattr(sys, "frozen", False):  # macOS .app: data files are in Contents/Resources
+        dirs.append(os.path.join(os.path.dirname(sys.executable), os.pardir, "Resources"))
+    return next((os.path.join(d, name) for d in dirs if d and os.path.isfile(os.path.join(d, name))), None)
 
 
 # -----------------------------------------------------------------------------
@@ -800,6 +840,8 @@ class FrameControls(QtWidgets.QWidget):
             self.fps.blockSignals(True)
             self.fps.setValue(int(min(60, max(1, round(1.0 / dt)))) if dt else 10)
             self.fps.blockSignals(False)
+            for w in (self.play_btn, self.fps, self.speed):  # set_axis_enabled may have turned them off (3D)
+                w.setEnabled(True)
             self._configuring = True
             self.mode.setEnabled(self._times is not None)
             self.mode.setCurrentIndex(self._preferred_mode if self._times is not None else 1)
@@ -811,6 +853,25 @@ class FrameControls(QtWidgets.QWidget):
 
     def index(self) -> tuple:
         return tuple(r["slider"].value() for r in self.rows)
+
+    def set_axis_enabled(self, letter: str, on: bool) -> None:
+        """Enable or disable the row of axis *letter* (the 3D view shows every Z plane at once)."""
+        for i, r in enumerate(self.rows):
+            if r["letter"] != letter or r["slider"].isEnabled() == on:
+                continue
+            for w in (r["label"], r["slider"], r["spin"], r["info"]):
+                w.setEnabled(on)
+            r["slider"].setToolTip("" if on else f"The 3D view shows all {r['n']} {letter} planes")
+            if i == self.play_row:  # playback steps this axis
+                if not on:
+                    self.stop()
+                for w in (self.play_btn, self.fps, self.speed):
+                    w.setEnabled(on)
+                self.mode.setEnabled(on and self._times is not None)
+
+    def can_step(self) -> bool:
+        """Playback and frame steps are possible: there is a play axis and its row is enabled."""
+        return bool(self.rows) and self.rows[self.play_row]["slider"].isEnabled()
 
     def set_index(self, index: tuple) -> None:
         """Move the sliders without signals (another stack of the same shape keeps the frame)."""
@@ -832,17 +893,17 @@ class FrameControls(QtWidgets.QWidget):
         self.indexChanged.emit()
 
     def step(self, delta: int) -> None:
-        if self.rows:
+        if self.can_step():
             r = self.rows[self.play_row]
             r["slider"].setValue((r["slider"].value() + delta) % r["n"])
 
     def jump(self, where: int) -> None:
-        if self.rows:
+        if self.can_step():
             r = self.rows[self.play_row]
             r["slider"].setValue(0 if where == 0 else r["n"] - 1)
 
     def toggle_play(self) -> None:
-        if not self.rows:
+        if not self.can_step():
             return
         if self.timer.isActive():
             self.stop()
@@ -1146,6 +1207,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.linescan_windows: list = []
         self.mosaics: dict[str, list] = {}       # file key -> msr_mosaic.Mosaic objects
         self._outline_items: list = []
+        self._layout_versions: dict[int, int] = {}   # id(mosaic) -> number of layout changes (3D reload key)
+        # 3D view (msr_volume_view / msr_volume_panel, created when it is first switched on)
+        self.volume_view = None
+        self.volume_panel = None
+        self.volume_scroll: QtWidgets.QScrollArea | None = None
+        self._vol_loader = None                  # VolumeLoadThread of the volume being loaded
+        self._vol_threads: set = set()           # loaders still running (cancelled ones finish on their own)
+        self._vol_key = None                     # load key of the volume in the 3D view
+        self._vol_skip_key = None                # load key that failed or was cancelled: not retried by itself
+        self._vol_channels: dict[tuple, object] = {}   # (file, stack) -> its 3D ChannelSettings, kept while open
+        self._vol_looks: dict[tuple, tuple] = {}       # (file, stack) -> (colour, lut) last taken from the 2D view
+        self._vol_resolution = "auto"            # resolution mode asked for (the 3D tab's Resolution)
+        self._vol_mode = None                    # ... of the volume in the 3D view
+        self._vol_load_mode = "auto"             # ... of the volume being loaded
+        self._vol_gpu = ""                       # renderer of the 3D view (or why OpenGL failed)
+        self._vol_gl_ok = True
+        self._vol_load_text = ""                 # "Loading <stack>…"
+        self._vol_load_message = False           # show the loading progress over the 3D view
         self._build_ui()
         self._build_actions()
         for w in self.findChildren(QtWidgets.QWidget):
@@ -1174,15 +1253,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.mouseLeft.connect(lambda: self.pixel_label.setText(""))
         self.view.zoomChanged.connect(lambda z: self.zoom_label.setText(f"{z * 100:.0f} %"))
         self.frames = FrameControls()
-        self.frames.indexChanged.connect(self._render_frame)
+        self.frames.indexChanged.connect(self._index_changed)
         self.view.stepRequested.connect(self.frames.step)
         self.view.jumpRequested.connect(self.frames.jump)
         self.view.playRequested.connect(self.frames.toggle_play)
+        self.view_stack = QtWidgets.QStackedWidget()   # the 2D view, and the 3D view once it is used
+        self.view_stack.addWidget(self.view)
         self.viewer_page = QtWidgets.QWidget()
         vl = QtWidgets.QVBoxLayout(self.viewer_page)
         vl.setContentsMargins(0, 0, 0, 0)
         vl.setSpacing(0)
-        vl.addWidget(self.view, 1)
+        vl.addWidget(self.view_stack, 1)
         vl.addWidget(self.frames)
         self.overview = OverviewPage()
         self.overview.stackActivated.connect(self._select_stack)
@@ -1192,7 +1273,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.center.addWidget(page)
 
         self.display = DisplayPanel()
-        self.display.changed.connect(lambda: self._render_frame(histogram=False))
+        self.display.changed.connect(self._display_changed)
         self.display.autoRequested.connect(self._auto_contrast)
         self.composite = CompositePanel()
         self.composite.hide()
@@ -1275,7 +1356,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_video = act("Export &video (MP4)…", self.export_video, "Ctrl+Shift+V",
                            tip="Timelapse or z sweep as MP4: real acquisition timing (× speed) or a fixed frame rate")
         self.a_quit = act("&Quit", self.close, QtGui.QKeySequence.Quit)
-        self.a_fit = act("&Fit to window", self.view.fit, "F", tip="Fit (F, or double-click the image)")
+        self.a_fit = act("&Fit to window", self._fit, "F", tip="Fit (F, or double-click the image)")
         self.a_1to1 = act("&Actual pixels", self.view.zoom_1to1, "1", tip="100 %: one image pixel per screen pixel (1)")
         self.a_scalebar = act("Scale &bar", self._toggle_scalebar, "B", tip="Show scale bar (B)")
         self.a_scalebar.setCheckable(True)
@@ -1287,10 +1368,19 @@ class MainWindow(QtWidgets.QMainWindow):
                                     "and levels (C)")
         self.a_composite.setStatusTip(self.a_composite.toolTip())
         self.a_composite.toggled.connect(self._toggle_composite)
+        self.a_volume = QtWidgets.QAction(_volume_icon(), "&3D view", self)
+        self.a_volume.setCheckable(True)
+        self.a_volume.setShortcut(QtGui.QKeySequence("3"))
+        self.a_volume.setToolTip("Show z-stacks and 3D mosaics as a volume: drag rotates, Shift+drag moves, "
+                                 "wheel zooms (3)")
+        self.a_volume.setStatusTip(self.a_volume.toolTip())
+        self.a_volume.toggled.connect(self.toggle_volume)
         self.a_play = act("&Play / pause", self.frames.toggle_play, "P")
         self.a_prev = act("Previous frame", lambda: self.frames.step(-1), ",")
         self.a_next = act("Next frame", lambda: self.frames.step(1), ".")
         self.a_about = act("&About", self.about)
+        self.a_notices = act("&Third-party notices…", self.show_notices,
+                             tip="Licenses of code the viewer is based on (3Dscript for the 3D view)")
         self.a_psf = QtWidgets.QAction("&PSF analysis", self)
         self.a_psf.setCheckable(True)
         self.a_psf.setShortcut(QtGui.QKeySequence("Ctrl+Shift+P"))
@@ -1304,7 +1394,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                  tip="The fused mosaic as shown (layout and blending) as OME-TIFF or ImageJ TIFF")
         self.a_mosaic_video = act("Video…", self.export_video,
                                   tip="Z sweep (or timelapse) of the fused mosaic as MP4")
-        self.a_mosaic_png = act("PNG…", self.save_png, tip="The current plane of the fused mosaic, as shown (PNG)")
+        self.a_mosaic_png = act("PNG…", self._save_2d_png,   # the plane also while the 3D view is shown
+                                tip="The current plane of the fused mosaic, as shown (PNG)")
         self.mosaic_panel.add_output_actions([self.a_mosaic_tiff, self.a_mosaic_video, self.a_mosaic_png])
 
         mb = self.menuBar()
@@ -1313,22 +1404,24 @@ class MainWindow(QtWidgets.QMainWindow):
                   self.a_video, self.a_export_ts, None, self.a_close, self.a_quit):
             m.addSeparator() if a is None else m.addAction(a)
         m = mb.addMenu("&View")
-        for a in (self.a_fit, self.a_1to1, self.a_scalebar, self.a_composite, None, self.a_play, self.a_prev,
-                  self.a_next):
+        for a in (self.a_fit, self.a_1to1, self.a_scalebar, self.a_composite, self.a_volume, None, self.a_play,
+                  self.a_prev, self.a_next):
             m.addSeparator() if a is None else m.addAction(a)
         self.tools_menu = mb.addMenu("&Tools")
         self.tools_menu.addAction(self.a_psf)
         self.tools_menu.addAction(self.a_linescan)
         self.tools_menu.addSeparator()
         self.tools_menu.addAction(self.a_calibrate)
-        mb.addMenu("&Help").addAction(self.a_about)
+        m = mb.addMenu("&Help")
+        m.addAction(self.a_about)
+        m.addAction(self.a_notices)
 
         tb = self.addToolBar("Main")
         tb.setObjectName("main_toolbar")
         tb.setMovable(False)
         tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         for a in (self.a_open, self.a_export, self.a_video, None, self.a_fit, self.a_1to1, self.a_scalebar,
-                  self.a_composite, None, self.a_psf, self.a_linescan):
+                  self.a_composite, self.a_volume, None, self.a_psf, self.a_linescan):
             tb.addSeparator() if a is None else tb.addAction(a)
         self.toolbar = tb
 
@@ -1382,7 +1475,7 @@ class MainWindow(QtWidgets.QMainWindow):
             stacks = self.files[key].stacks
             first = next((i for i, s in enumerate(stacks) if isinstance(s, mm.MosaicStack)), 0)  # a mosaic first
             self.tree.setCurrentItem(last.child(first) if last.childCount() else last)
-            self.view.setFocus()
+            self._focus_view()
         if errors:
             QtWidgets.QMessageBox.warning(self, APP_NAME, "Could not open:\n\n" + "\n\n".join(errors))
         self._update_actions()
@@ -1447,6 +1540,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, APP_NAME, "Please wait until the export has finished.")
             return
         self._stop_registration()
+        self._release_volume_of(key)  # before the file closes: loaders read from it
         if self.cur_key and self.cur_key[0] == key:
             self.frames.stop()
             self.frames.configure(self.files[key].stacks[0], "", ())
@@ -1480,7 +1574,7 @@ class MainWindow(QtWidgets.QMainWindow):
         key = self._current_file_key()
         if key is not None and pos < self.file_items[key].childCount():
             self.tree.setCurrentItem(self.file_items[key].child(pos))
-            self.view.setFocus()
+            self._focus_view()
 
     def _on_tree_current(self, cur, prev) -> None:
         if cur is None:
@@ -1503,6 +1597,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.display.setEnabled(False)
         self.composite.hide()
         self._show_mosaic_tab(None)
+        self._leave_volume(release=True)
         self.pixel_label.setText("")
         self.setWindowTitle(f"{os.path.basename(msr.path)} — {APP_NAME}")
 
@@ -1536,8 +1631,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings_panel.set_sources(self._setting_sources(msr, s), msr.labels)
         ident = f"{_stack_label(pos, s)} · {s.channel_id}" if s.channel_id else _stack_label(pos, s)
         self.setWindowTitle(f"{ident} — {os.path.basename(msr.path)} — {APP_NAME}")
+        self._update_volume()
 
     # -- rendering ------------------------------------------------------------------
+
+    def _index_changed(self) -> None:
+        """A frame slider moved: the 2D frame, and the 3D volume when another T (or other non-Z) index is shown."""
+        self._render_frame()
+        if self._volume_shown():
+            self._update_volume()
+
+    def _display_changed(self) -> None:
+        """LUT or levels of the current stack edited in the Display tab."""
+        self._render_frame(histogram=False)
+        self._sync_volume_looks()
 
     def _render_frame(self, reset: bool = False, histogram: bool = True, new_stack: bool | None = None) -> None:
         if self.arr is None or self.cur_key is None:
@@ -1604,8 +1711,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pixel_label.setText(text)
 
     def _toggle_scalebar(self) -> None:
+        if self._volume_shown():  # B acts on the view that is shown
+            settings = self.volume_view.settings
+            settings.show_scalebar = not settings.show_scalebar   # the 3D tab may have changed it meanwhile
+            self.a_scalebar.setChecked(settings.show_scalebar)
+            self.volume_panel.refresh()
+            self.volume_view.settings_changed()
+            return
         self.view.show_scalebar = self.a_scalebar.isChecked()
         self.view.viewport().update()
+
+    def _fit(self) -> None:
+        if self._volume_shown():
+            self.volume_view.set_preset("fit")
+        else:
+            self.view.fit()
+
+    def _focus_view(self) -> None:
+        """Keyboard focus to the 2D or the 3D view, whichever is shown."""
+        (self.volume_view if self._volume_shown() else self.view).setFocus()
 
     # -- composite --------------------------------------------------------------------
 
@@ -1676,16 +1800,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tabs.setCurrentIndex(0)  # the channel table is in the Display tab
         self._update_composite_panel()
         self._render_frame(histogram=False)
+        self._update_volume()
         self._update_actions()
 
     def _composite_toggled(self, pos: int, on: bool) -> None:
         self.comp_on[(self.cur_key[0], pos)] = on
         self._render_frame(histogram=False)
+        self._update_volume()
 
     def _composite_color(self, pos: int, color: QtGui.QColor) -> None:
         self.comp_colors[(self.cur_key[0], pos)] = color
         self._update_composite_panel()
         self._render_frame(histogram=False)
+        self._sync_volume_looks()
 
     def _composite_auto_all(self) -> None:
         idx = self.frames.index()
@@ -1724,6 +1851,7 @@ class MainWindow(QtWidgets.QMainWindow):
         key = next((k for k, group in self.mosaics.items() if mosaic in group), None)
         if key is None or key not in self.files:
             return
+        self._layout_versions[id(mosaic)] = self._layout_versions.get(id(mosaic), 0) + 1   # a 3D volume reloads
         stacks = self.files[key].stacks
         pos = next((i for i, t in enumerate(stacks) if t is mosaic.stack), None)
         for k in [k for k in self._comp_arrays if k[0] == key and k[1] == pos]:
@@ -1754,6 +1882,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elif self.cur_key and self.cur_key[0] == key and showing:
             self._update_composite_panel()
             self._render_frame(histogram=False)
+        self._update_volume()
         self._update_actions()
 
     def _update_outlines(self) -> None:
@@ -1782,6 +1911,423 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tasks.add(thread)
         thread.finished.connect(lambda: (self.tasks.discard(thread), self._update_actions()))
         self._update_actions()
+
+    # -- 3D view -----------------------------------------------------------------------
+
+    def toggle_volume(self, on: bool) -> None:
+        """3D view of z-stacks and 3D mosaics on or off; it stays on as a preference while a stack has no Z."""
+        if on and self.volume_view is None and not self._create_volume_view():
+            self.a_volume.setChecked(False)
+            return
+        self._vol_skip_key = None  # switching on again retries a load that failed or was cancelled
+        self._update_volume()
+        if on and self._volume_shown() and self.tabs.currentWidget() is not self.volume_scroll:
+            self.tabs.setCurrentWidget(self.volume_scroll)
+        if self.center.currentWidget() is self.viewer_page:
+            self._focus_view()
+        self._update_actions()
+
+    def _create_volume_view(self) -> bool:
+        """The 3D view and its tab, on first use; False (after a message) if they cannot run here."""
+        try:
+            import msr_volume_panel
+            import msr_volume_view
+        except ImportError as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, "The 3D view could not be loaded (msr_volume.py, "
+                                          "msr_volume_view.py and msr_volume_panel.py belong next to "
+                                          f"msr_viewer.py):\n\n{exc}")
+            return False
+        QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:  # a context that cannot be made would break the whole window once a GL widget is in it
+            problem = msr_volume_view.opengl_problem()
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if problem:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, problem)
+            return False
+        view = msr_volume_view.VolumeView()
+        view.glReady.connect(self._volume_gl_ready)
+        self.view_stack.addWidget(view)
+        panel = msr_volume_panel.VolumePanel(view)
+        panel.set_resolution(self._vol_resolution)
+        panel.resolutionChanged.connect(self._volume_resolution)
+        panel.fromTwoDRequested.connect(self._volume_from_2d)
+        panel.saveRequested.connect(self.save_png)
+        panel.copyRequested.connect(self._copy_volume_image)
+        panel.cancelRequested.connect(self._cancel_volume_load)
+        panel.reloadRequested.connect(self._reload_volume)
+        panel.overlayChanged.connect(self._sync_scalebar_action)   # the panel's Scale bar box -> B's check mark
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setFocusPolicy(Qt.NoFocus)   # a click on the tab's background leaves the keys with the 3D view
+        scroll.setWidget(panel)
+        for w in [scroll] + scroll.findChildren(QtWidgets.QWidget):
+            w.setAcceptDrops(False)
+        self.volume_view, self.volume_panel, self.volume_scroll = view, panel, scroll
+        return True
+
+    def _current_stack(self) -> mr.DataStack | None:
+        """The stack on the viewer page, or None (file overview or welcome page)."""
+        if (self.cur_key is None or self.cur_key[0] not in self.files
+                or self.center.currentWidget() is not self.viewer_page):
+            return None
+        return self.files[self.cur_key[0]].stacks[self.cur_key[1]]
+
+    def _volume_shown(self) -> bool:
+        return (self.volume_view is not None and self.view_stack.currentWidget() is self.volume_view
+                and self.center.currentWidget() is self.viewer_page)
+
+    def _update_volume(self) -> None:
+        """Show the 3D view while it is on and the current stack has Z planes; load its volume when needed."""
+        s = self._current_stack()
+        if not (self.a_volume.isChecked() and self.volume_view is not None and s is not None and _z_planes(s) > 1):
+            self._leave_volume()
+            return
+        self._enter_volume()
+        key, keys, index, factor = self._volume_request(s)
+        if key in (self._vol_key, self._vol_skip_key):
+            if self._vol_loader is not None:  # back to what is shown (or failed): the other load is not needed
+                self._stop_volume_loads()
+            if key == self._vol_key:  # what is shown is what is selected: no note about another request
+                self.volume_view.set_message(None)
+                self.volume_panel.show_reload(False)
+                self._volume_info()
+            self._sync_volume_looks()
+            return
+        if (self._vol_loader is not None and self._vol_loader.key == key) or not self._vol_gl_ok:
+            return
+        self._start_volume_load(key, keys, index, factor)
+
+    def _volume_request(self, s: mr.DataStack) -> tuple:
+        """(load key, (file, stack) keys, frame index, downsampling) of the volume to show.
+
+        The channels are the active composite channels while Composite is on, else the
+        current stack: what the 2D view shows.  The key changes with anything that changes
+        the volume: stacks, non-Z frame index, mosaic layout, calibration and downsampling.
+        """
+        import msr_volume
+        stacks = self.files[self.cur_key[0]].stacks
+        members = self._composite_members()
+        keys = [k for k in members if self.comp_on.get(k, True)] or [self.cur_key]
+        index = self.frames.index()
+        others = tuple((a, i) for a, i in zip(s.axes[:-2], index) if a != "Z")
+        factor = msr_volume.stack_factors(s, self._vol_resolution, self.volume_view.max_texture_size())
+
+        def ident(k: tuple) -> tuple:
+            t = stacks[k[1]]
+            layout = self._layout_versions.get(id(t.mosaic), 0) if isinstance(t, mm.MosaicStack) else 0
+            return k, layout, t.axes, tuple(t.shape), t.step("X"), t.step("Y"), t.step("Z"), tuple(t.units)
+
+        return (tuple(ident(k) for k in keys), others, factor), keys, index, factor
+
+    def _start_volume_load(self, key: tuple, keys: list, index: tuple, factor: tuple) -> None:
+        import msr_volume_view
+        self._stop_volume_loads()
+        stacks = self.files[self.cur_key[0]].stacks
+        sources = [(_stack_label(k[1], stacks[k[1]]), _frozen(stacks[k[1]]), k) for k in keys]
+        thread = msr_volume_view.VolumeLoadThread(sources, index, factor=factor, key=key, parent=self)
+        thread.progress.connect(lambda done, total, t=thread: self._volume_progress(t, done, total))
+        thread.done.connect(lambda volume, t=thread: self._volume_loaded(t, volume))
+        thread.failed.connect(lambda msg, t=thread: self._volume_failed(t, msg))
+        thread.finished.connect(lambda t=thread: self._volume_thread_finished(t))
+        self._vol_loader = thread
+        self._vol_threads.add(thread)
+        self._vol_skip_key = None
+        self._vol_load_mode = self._vol_resolution
+        what = sources[0][0] if len(sources) == 1 else f"{len(sources)} channels"
+        self._vol_load_text = f"Loading {what}…"
+        # other stacks than the volume on screen: say so over it (not for another time point of the same)
+        shown = [ident[0] for ident in self._vol_key[0]] if self._vol_key else []
+        self._vol_load_message = shown != keys
+        self.volume_panel.set_loading(self._vol_load_text, 0, len(keys) * _z_planes(stacks[keys[0][1]]))
+        self.volume_view.set_message(self._vol_load_text if self._vol_load_message else None)
+        self._volume_info()
+        thread.start()
+        self._update_actions()
+
+    def _volume_progress(self, thread, done: int, total: int) -> None:
+        if thread is not self._vol_loader:
+            return
+        self.volume_panel.set_loading(self._vol_load_text, done, total)
+        if self._vol_load_message:
+            self.volume_view.set_message(f"{self._vol_load_text} {100 * done // max(total, 1)} %")
+
+    def _volume_loaded(self, thread, volume) -> None:
+        if thread is not self._vol_loader:  # superseded or cancelled
+            return
+        self._vol_loader = None
+        self.volume_panel.set_loading(None)
+        self.volume_view.set_message(None)
+        if volume is not None:
+            self.volume_view.set_volume(volume, self._volume_channel_settings(volume), keep_view=True)
+            self.volume_panel.set_volume(volume)
+            self._vol_key, self._vol_mode = thread.key, self._vol_load_mode
+        self._update_actions()
+
+    def _volume_failed(self, thread, msg: str) -> None:
+        if thread is not self._vol_loader:
+            return
+        self._vol_loader = None
+        self.volume_panel.set_loading(None)
+        self._load_stopped(thread.key, f"The volume could not be loaded: {msg}")
+        self._update_actions()
+
+    def _volume_thread_finished(self, thread) -> None:
+        self._vol_threads.discard(thread)
+        thread.deleteLater()
+        self._update_actions()
+
+    def _stop_volume_loads(self, wait: bool = False) -> None:
+        """Cancel the 3D loaders; *wait* until they have stopped (before their file closes)."""
+        if self._vol_loader is not None:
+            self._vol_loader = None
+            self.volume_panel.set_loading(None)
+            self.volume_view.set_message(None)
+        for t in list(self._vol_threads):
+            t.cancel()
+        running = [t for t in self._vol_threads if t.isRunning()] if wait else []
+        if running:
+            QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                for t in running:
+                    t.wait(30000)  # a cancelled loader stops after the plane it reads
+            finally:
+                QtWidgets.QApplication.restoreOverrideCursor()
+
+    def _cancel_volume_load(self) -> None:
+        """Cancel in the 3D tab: stop loading; the same volume is not loaded again by itself."""
+        thread = self._vol_loader
+        self._stop_volume_loads()
+        self.volume_panel.set_loading(None)
+        if thread is not None:
+            self._load_stopped(thread.key, "Loading was cancelled.")
+        self._update_actions()
+
+    def _load_stopped(self, key: tuple, text: str) -> None:
+        """The load of *key* was cancelled or failed (*text*); it is not retried by itself.
+
+        If it differs from the volume shown in the resolution only, that volume stays and the
+        resolution goes back to its mode.  Otherwise the view is cleared (the old volume is not
+        what the tree and the sliders select) and the 3D tab offers Reload.
+        """
+        self._vol_skip_key = key
+        if self._vol_key is not None and key[:2] == self._vol_key[:2]:
+            self._vol_resolution = self._vol_mode
+            self.volume_panel.set_resolution(self._vol_mode)
+            self.volume_view.set_message(None)
+            self._volume_info(f"{text} The volume keeps its resolution.")
+            return
+        self._drop_volume()
+        self.volume_view.set_message(f"{text}\nReload in the 3D tab tries again.")
+        self.volume_panel.show_reload(True)
+        self._volume_info(text)
+
+    def _reload_volume(self) -> None:
+        """Reload in the 3D tab, after a cancelled or failed load."""
+        self._vol_skip_key = None
+        self._update_volume()
+
+    def _drop_volume(self) -> None:
+        """No volume in the 3D view, its textures freed (the 3D settings of every stack stay)."""
+        if self.volume_view.volume is not None or self.volume_view.channels:
+            self.volume_view.release()          # the textures
+            self.volume_view.set_volume(None, [])
+            self.volume_panel.set_volume(None)
+        self._vol_key = self._vol_mode = None
+
+    def _enter_volume(self) -> None:
+        """The 3D view in place of the 2D view, its tab, and the Z slider off."""
+        if self.view_stack.currentWidget() is not self.volume_view:
+            self.view_stack.setCurrentWidget(self.volume_view)
+            self._sync_scalebar_action()
+            self.pixel_label.setText(VOLUME_HINT)
+            self.zoom_label.hide()  # the zoom of the 2D view
+        if self.tabs.indexOf(self.volume_scroll) < 0:
+            i = self.tabs.indexOf(self.mosaic_scroll)
+            self.tabs.insertTab(i + 1 if i >= 0 else 1, self.volume_scroll, "3D")
+            if self.psf is None or self.tabs.currentWidget() is not self.psf:
+                self.tabs.setCurrentWidget(self.volume_scroll)
+        self.frames.set_axis_enabled("Z", False)
+
+    def _leave_volume(self, release: bool = False) -> None:
+        """Back to the 2D view without the 3D tab, loading stopped; *release* also drops the volume.
+
+        A volume larger than KEEP_VOLUME_BYTES is dropped too; a smaller one stays (RAM and
+        textures), so that switching 3D on again shows it at once.
+        """
+        if self.volume_view is None:
+            return
+        self._stop_volume_loads(wait=release)
+        if self.view_stack.currentWidget() is self.volume_view:
+            self.view_stack.setCurrentWidget(self.view)
+            self._sync_scalebar_action()
+            self.zoom_label.show()
+            if self.pixel_label.text() == VOLUME_HINT:
+                self.pixel_label.setText("")
+        i = self.tabs.indexOf(self.volume_scroll)
+        if i >= 0:
+            current = self.tabs.currentIndex() == i
+            self.tabs.removeTab(i)
+            if current:
+                self.tabs.setCurrentIndex(0)  # the Display tab rather than whichever tab is next
+        self.frames.set_axis_enabled("Z", True)
+        volume = self.volume_view.volume
+        if release or (volume is not None and volume.nbytes > KEEP_VOLUME_BYTES):
+            self._drop_volume()
+            self.volume_view.set_message(None)
+            self.volume_panel.show_reload(False)
+            self._vol_skip_key = None
+
+    def _release_volume_of(self, key: str) -> None:
+        """File *key* is about to close: stop every 3D loader and drop what the 3D view holds of it."""
+        for m in self.mosaics.get(key, []):
+            self._layout_versions.pop(id(m), None)
+        if self.volume_view is None:
+            return
+        self._stop_volume_loads(wait=True)
+        shown = self._vol_key is not None and any(ident[0][0] == key for ident in self._vol_key[0])
+        if shown or (self.cur_key is not None and self.cur_key[0] == key):
+            self._leave_volume(release=True)
+        for d in (self._vol_channels, self._vol_looks):
+            for k in [k for k in d if k[0] == key]:
+                del d[k]
+        self.volume_panel.forget(key)   # Reset snapshots live as long as the settings above
+
+    def _sync_scalebar_action(self) -> None:
+        """Scale bar (B) checked as in the view that is shown."""
+        on = self.volume_view.settings.show_scalebar if self._volume_shown() else self.view.show_scalebar
+        self.a_scalebar.setChecked(bool(on))
+
+    def _volume_look(self, k: tuple, members: list[tuple]) -> tuple:
+        """(colour, lut) of a 3D channel as stack *k* looks in 2D: composite colour, or its LUT."""
+        if k in members:
+            c = self._member_color(k, members)
+            return (c.redF(), c.greenF(), c.blueF()), None
+        lut = self._member_state(k).lut
+        if lut in RAMP_LUTS:
+            return tuple(float(v) / 255.0 for v in LUTS[lut][-1]), None
+        return (1.0, 1.0, 1.0), lut
+
+    def _follow_look(self, cs, look: tuple) -> bool:
+        """Give a 3D channel the colour of the 2D view unless it was changed in the 3D tab; True if it changed."""
+        old = self._vol_looks.get(cs.key)
+        if look == old or (old is not None and (tuple(cs.color), cs.lut) != old):
+            return False
+        cs.color, cs.lut = look
+        self._vol_looks[cs.key] = look
+        return True
+
+    def _volume_channel_settings(self, volume) -> list:
+        """3D settings of the volume's channels: kept per stack while its file is open, new ones from 2D."""
+        import msr_volume
+        members = self._composite_members()
+        out = []
+        for vc in volume.channels:
+            k = vc.key
+            look = self._volume_look(k, members)
+            cs = self._vol_channels.get(k)
+            if cs is None:
+                st = self._member_state(k)
+                cs = msr_volume.ChannelSettings(name=vc.name, color=look[0], lut=look[1], key=k)
+                cs.set_window(st.lo, st.hi)
+                self._vol_channels[k] = cs
+                self._vol_looks[k] = look
+            else:
+                self._follow_look(cs, look)
+            out.append(cs)
+        return out
+
+    def _sync_volume_looks(self) -> None:
+        """Colours of the 3D channels after a 2D LUT or composite colour change."""
+        if self.volume_view is None or not self.volume_view.channels:
+            return
+        members = self._composite_members()
+        changed = False
+        for cs in self.volume_view.channels:
+            if cs.key is not None and cs.key[0] in self.files:
+                changed |= self._follow_look(cs, self._volume_look(cs.key, members))
+        if changed:
+            self.volume_panel.refresh()
+            self.volume_view.settings_changed()
+
+    def _volume_info(self, error: str | None = None) -> None:
+        """Renderer (or why OpenGL failed) and an error under the volume summary of the 3D tab."""
+        gpu = (f"OpenGL: {self._vol_gpu}" if self._vol_gl_ok else self._vol_gpu) if self._vol_gpu else ""
+        self.volume_panel.set_info("\n".join(t for t in (gpu, error) if t))
+
+    def _volume_gl_ready(self, ok: bool, text: str) -> None:
+        self._vol_gl_ok, self._vol_gpu = ok, text
+        if not ok:
+            self._stop_volume_loads()
+        self._volume_info()
+        if ok:  # the texture size limit is known now; reloads only if it changes the downsampling
+            QtCore.QTimer.singleShot(0, self._update_volume)
+
+    def _volume_resolution(self, mode: str) -> None:
+        self._vol_resolution = mode
+        self._vol_skip_key = None  # picked in the 3D tab: always tried, also after a cancel or failure
+        self._update_volume()
+
+    def _volume_from_2d(self, i: int) -> None:
+        """2D button of the 3D tab: channel *i* gets the Min / Max of its stack in the 2D view."""
+        chans = self.volume_view.channels
+        if not 0 <= i < len(chans) or chans[i].key is None or chans[i].key[0] not in self.files:
+            return
+        st = self._member_state(chans[i].key)
+        chans[i].set_window(st.lo, st.hi)
+        self.volume_panel.refresh()
+        self.volume_view.settings_changed()
+
+    def _render_volume_image(self) -> QtGui.QImage | None:
+        """Full-quality image of the 3D view with its overlays, or None (after a message)."""
+        if self.volume_view.volume is None:
+            QtWidgets.QMessageBox.information(self, APP_NAME, "The volume is not loaded yet.")
+            return None
+        QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            img, error = self.volume_view.render_image(), None
+        except RuntimeError as exc:
+            img, error = None, str(exc)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if error:
+            QtWidgets.QMessageBox.critical(self, APP_NAME, f"Could not render the 3D view:\n\n{error}")
+        return img
+
+    def _copy_volume_image(self) -> None:
+        img = self._render_volume_image()
+        if img is not None:
+            QtWidgets.QApplication.clipboard().setImage(img)
+            self.statusBar().showMessage(f"3D view copied to the clipboard ({img.width()} × {img.height()} px)", 5000)
+
+    def _save_volume_png(self) -> None:
+        """Save view as PNG while the 3D view is shown: the rendered view with its overlays.
+
+        The file is named after the volume shown, which differs from the selection while
+        another stack or time point loads.
+        """
+        keys = [ident[0] for ident in self._vol_key[0]] if self._vol_key else []   # (file, stack) of each channel
+        if self.volume_view.volume is None or not keys or keys[0][0] not in self.files:
+            QtWidgets.QMessageBox.information(self, APP_NAME, "The volume is not loaded yet.")
+            return
+        msr = self.files[keys[0][0]]
+        pos = keys[0][1]
+        s = msr.stacks[pos]
+        part = ("composite" if len(keys) > 1 else
+                _file_part(pos, s) if isinstance(s, mm.MosaicStack) else f"S{pos + 1}")
+        frame_txt = "_".join(f"{a}{i + 1}" for a, i in self._vol_key[1])
+        name = f"{mr.file_stem(msr.path)}_{part}{'_' + frame_txt if frame_txt else ''}_3d.png"
+        start = os.path.join(self.qsettings.value("export_dir", os.path.dirname(msr.path)), name)
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save 3D view as PNG", start, "PNG image (*.png)")
+        if not path:
+            return
+        if not path.lower().endswith(".png"):
+            path += ".png"
+        img = self._render_volume_image()
+        if img is not None and not img.save(path):
+            QtWidgets.QMessageBox.critical(self, APP_NAME, f"Could not write {path}")
 
     # -- panels ---------------------------------------------------------------------
 
@@ -1991,6 +2537,14 @@ class MainWindow(QtWidgets.QMainWindow):
                                                   os.path.dirname(path)), "Saving")
 
     def save_png(self) -> None:
+        """Save view as PNG: the 3D view while it is shown, else the 2D frame."""
+        if self._volume_shown():
+            self._save_volume_png()
+        else:
+            self._save_2d_png()
+
+    def _save_2d_png(self) -> None:
+        """The current 2D frame (or composite) with its LUT and scale bar, at full resolution."""
         if self.frame is None or self.cur_key is None:
             return
         msr = self.files[self.cur_key[0]]
@@ -2211,10 +2765,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_close.setEnabled(has_file and not busy)
         for a in (self.a_save_stack,):
             a.setEnabled(showing_stack and not busy)
-        for a in (self.a_save_png, self.a_fit, self.a_1to1):
+        volume = self._volume_shown()
+        for a in (self.a_save_png, self.a_fit):
             a.setEnabled(showing_stack)
+        self.a_1to1.setEnabled(showing_stack and not volume)
+        stack = self.files[self.cur_key[0]].stacks[self.cur_key[1]] if showing_stack else None
+        self.a_volume.setEnabled(stack is not None and _z_planes(stack) > 1)
         for a in (self.a_play, self.a_prev, self.a_next):
-            a.setEnabled(showing_stack and bool(self.frames.rows))
+            a.setEnabled(showing_stack and self.frames.can_step())  # not on the Z row in 3D
         has_times = showing_stack and bool(self.files[self.cur_key[0]].stacks[self.cur_key[1]].timestamps)
         self.a_export_ts.setEnabled(has_times)
         self.a_video.setEnabled(showing_stack and bool(self.frames.rows) and not busy)
@@ -2228,8 +2786,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_mosaic_tiff.setEnabled(showing_mosaic and not busy)
         self.a_mosaic_video.setEnabled(showing_mosaic and bool(self.frames.rows) and not busy)
         self.a_mosaic_png.setEnabled(showing_mosaic)
-        self.busy.setFormat("exporting…" if busy else "registering…")
-        self.busy.setVisible(bool(self.tasks))
+        self.busy.setFormat("exporting…" if busy else "registering…" if self.tasks else "loading 3D…")
+        self.busy.setVisible(bool(self.tasks) or self._vol_loader is not None)
 
     def _tree_menu(self, pos) -> None:
         item = self.tree.itemAt(pos)
@@ -2263,7 +2821,39 @@ class MainWindow(QtWidgets.QMainWindow):
             "and TIFF / OME-TIFF / ImageJ stacks, compressed files and mosaics (stitching).<br><br>"
             f"Reader: msr_reader.py {mr.__version__} (format notes: MSR_FORMAT.md)<br>"
             "Wheel: zoom · drag: pan · double-click: fit<br>"
-            "Left/Right: frame · Space: play · F: fit · 1: 100 % · B: scale bar")
+            "Left/Right: frame · Space: play · F: fit · 1: 100 % · B: scale bar · 3: 3D view<br><br>"
+            "The 3D view is a Python port of the renderer of the Fiji plugin "
+            "<a href='https://github.com/bene51/3Dscript'>3Dscript</a> (Copyright © 2016, Benjamin Schmid; "
+            "BSD 2-Clause License, see Help ▸ Third-party notices):<br>"
+            "Schmid B et al. 3Dscript: animating 3D/4D microscopy data using a natural-language-based syntax. "
+            "<i>Nat Methods</i> 16, 278–280 (2019).")
+
+    def show_notices(self) -> None:
+        """Help ▸ Third-party notices: THIRD_PARTY_NOTICES.md (shipped next to the viewer) in a dialog."""
+        self._notices_dialog().exec_()
+
+    def _notices_dialog(self) -> QtWidgets.QDialog:
+        path = _resource("THIRD_PARTY_NOTICES.md")
+        text = "THIRD_PARTY_NOTICES.md was not found next to the viewer."
+        if path:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    text = f.read()
+            except OSError as exc:
+                text = f"Could not read {path}: {exc}"
+        dlg = QtWidgets.QDialog(self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.setWindowTitle(f"Third-party notices — {APP_NAME}")
+        browser = QtWidgets.QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.setMarkdown(text)    # read-only; the license itself is a code block, shown verbatim
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        buttons.rejected.connect(dlg.reject)
+        lay = QtWidgets.QVBoxLayout(dlg)
+        lay.addWidget(browser)
+        lay.addWidget(buttons)
+        dlg.resize(760, 640)
+        return dlg
 
     # -- drag & drop ------------------------------------------------------------------
 
@@ -2306,6 +2896,9 @@ class MainWindow(QtWidgets.QMainWindow):
             ev.ignore()
             return
         self._stop_registration()
+        self._stop_volume_loads(wait=True)  # they read from the files closed below
+        if self.volume_view is not None:
+            self.volume_view.release()
         self.qsettings.setValue("geometry", self.saveGeometry())
         self.frames.stop()
         self.arr = self.frame = None
@@ -2364,6 +2957,22 @@ def _install_excepthook() -> None:
     sys.excepthook = hook
 
 
+def _init_opengl() -> None:
+    """OpenGL set-up for the 3D view; must run before the QApplication is created.
+
+    No context is made here: OpenGL is loaded when 3D is first switched on.  (Qt's
+    AA_ShareOpenGLContexts would create one at every start, and the 3D view never moves
+    to another window, so it needs no shared context.)
+    """
+    if sys.platform == "darwin":  # macOS offers OpenGL above 2.1 only as a core profile, which must be the default
+        fmt = QtGui.QSurfaceFormat()
+        fmt.setVersion(4, 1)
+        fmt.setProfile(QtGui.QSurfaceFormat.CoreProfile)
+        QtGui.QSurfaceFormat.setDefaultFormat(fmt)
+    if os.environ.get("MSR_VIEWER_SOFTWARE_GL", "").strip() not in ("", "0"):
+        QtCore.QCoreApplication.setAttribute(Qt.AA_UseSoftwareOpenGL)  # Qt's Mesa llvmpipe (Windows builds)
+
+
 def main(argv=None) -> int:
     argv = sys.argv if argv is None else argv
     if sys.stdout is None:  # pythonw
@@ -2380,6 +2989,7 @@ def main(argv=None) -> int:
     QtWidgets.QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     if hasattr(QtGui.QGuiApplication, "setHighDpiScaleFactorRoundingPolicy"):
         QtGui.QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    _init_opengl()
     app = _Application(argv)
     app.setApplicationName(APP_NAME)
     if sys.platform == "win32" and "Segoe UI" in QtGui.QFontDatabase().families():

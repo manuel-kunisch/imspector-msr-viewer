@@ -45,7 +45,7 @@ from typing import Any, ClassVar, Iterator
 
 import numpy as np
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 _U8 = struct.Struct("<B")
 _U16 = struct.Struct("<H")

@@ -26,6 +26,9 @@ datas = []
 datas += collect_data_files("pyqtgraph")
 # window icon, loaded next to msr_viewer.py
 datas += [(str(project_root / "msr_viewer.ico"), ".")]
+# license of 3Dscript, whose renderer the 3D view ports (BSD 2-Clause: binaries carry the notice);
+# Help > Third-party notices shows it (msr_viewer._resource finds it next to the modules)
+datas += [(str(project_root / "THIRD_PARTY_NOTICES.md"), ".")]
 
 # ffmpeg for the video export; imageio_ffmpeg looks for it in its own package folder
 binaries = [(src, dest) for src, dest in collect_data_files("imageio_ffmpeg", subdir="binaries")
@@ -49,6 +52,14 @@ a = Analysis(
         # imported on demand from the Tools menu
         "msr_psf",
         "msr_linescan",
+        # the 3D view, imported when it is first switched on
+        "msr_volume",
+        "msr_volume_view",
+        "msr_volume_panel",
+        # GL function tables that QOpenGLContext.versionFunctions() imports at run time
+        "PyQt5._QOpenGLFunctions_2_0",
+        "PyQt5._QOpenGLFunctions_2_1",
+        "PyQt5._QOpenGLFunctions_4_1_Core",
     ],
     hookspath=[],
     # the line scan plot export draws with Agg and saves PNG / PDF / SVG; no interactive backend

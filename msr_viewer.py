@@ -475,6 +475,24 @@ class DisplayPanel(QtWidgets.QWidget):
         self._apply((lo, hi))
 
 
+def _check_action(menu: QtWidgets.QMenu, text: str, icon: QtGui.QIcon, data) -> QtWidgets.QWidgetAction:
+    """A tick box with a colour swatch in *menu*: it stays open while boxes are ticked (several in one go),
+    and the tick shows next to the colour in every style (a checkable action shows only its icon)."""
+    box = QtWidgets.QCheckBox(text)
+    box.setIcon(icon)
+    box.setIconSize(QtCore.QSize(20, 12))
+    holder = QtWidgets.QWidget()
+    lay = QtWidgets.QHBoxLayout(holder)
+    lay.setContentsMargins(10, 3, 16, 3)
+    lay.addWidget(box)
+    a = QtWidgets.QWidgetAction(menu)
+    a.setDefaultWidget(holder)
+    a.setData(data)
+    a.setProperty("box", box)
+    menu.addAction(a)
+    return a
+
+
 class CompositePanel(QtWidgets.QGroupBox):
     """Channels of the composite: on / off, colour and levels; a click picks the channel Min / Max edit."""
 
@@ -506,7 +524,8 @@ class CompositePanel(QtWidgets.QGroupBox):
         b_auto = QtWidgets.QPushButton("Auto all")
         b_auto.setToolTip("0.1 – 99.9 % of the current frame, for every channel")
         b_auto.clicked.connect(self.autoAll)
-        hint = QtWidgets.QLabel("Min / Max below set the levels of the selected channel")
+        hint = QtWidgets.QLabel("Ticked channels are merged, in 2D and 3D. Min / Max below set the levels of "
+                                "the selected channel.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #9a9a9a;")
         row.addWidget(b_auto)
@@ -1365,9 +1384,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_composite.setCheckable(True)
         self.a_composite.setShortcut(QtGui.QKeySequence("C"))
         self.a_composite.setToolTip("Merge the channels of the file that have the same size, each with its own colour "
-                                    "and levels (C)")
-        self.a_composite.setStatusTip(self.a_composite.toolTip())
+                                    "and levels (C), in 2D and 3D.\nThe arrow ▾ chooses the channels.")
+        self.a_composite.setStatusTip("Merge the channels of the file that have the same size (C), in 2D and 3D; "
+                                      "the arrow chooses the channels")
         self.a_composite.toggled.connect(self._toggle_composite)
+        # which channels are merged: the arrow of the Composite button, View ▸ Composite channels, the 3D tab
+        self.comp_menu = QtWidgets.QMenu("Composite c&hannels", self)
+        self.comp_menu.setToolTipsVisible(True)
+        self.comp_menu.aboutToShow.connect(self._fill_composite_menu)
         self.a_volume = QtWidgets.QAction(_volume_icon(), "&3D view", self)
         self.a_volume.setCheckable(True)
         self.a_volume.setShortcut(QtGui.QKeySequence("3"))
@@ -1404,8 +1428,8 @@ class MainWindow(QtWidgets.QMainWindow):
                   self.a_video, self.a_export_ts, None, self.a_close, self.a_quit):
             m.addSeparator() if a is None else m.addAction(a)
         m = mb.addMenu("&View")
-        for a in (self.a_fit, self.a_1to1, self.a_scalebar, self.a_composite, self.a_volume, None, self.a_play,
-                  self.a_prev, self.a_next):
+        for a in (self.a_fit, self.a_1to1, self.a_scalebar, self.a_composite, self.comp_menu.menuAction(),
+                  self.a_volume, None, self.a_play, self.a_prev, self.a_next):
             m.addSeparator() if a is None else m.addAction(a)
         self.tools_menu = mb.addMenu("&Tools")
         self.tools_menu.addAction(self.a_psf)
@@ -1423,6 +1447,10 @@ class MainWindow(QtWidgets.QMainWindow):
         for a in (self.a_open, self.a_export, self.a_video, None, self.a_fit, self.a_1to1, self.a_scalebar,
                   self.a_composite, self.a_volume, None, self.a_psf, self.a_linescan):
             tb.addSeparator() if a is None else tb.addAction(a)
+        comp_button = tb.widgetForAction(self.a_composite)   # click: Composite on / off; arrow: its channels
+        if isinstance(comp_button, QtWidgets.QToolButton):
+            comp_button.setMenu(self.comp_menu)
+            comp_button.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
         self.toolbar = tb
 
     # -- file handling -------------------------------------------------------------
@@ -1796,17 +1824,102 @@ class MainWindow(QtWidgets.QMainWindow):
         self.composite.set_channels(rows, self.cur_key[1])
 
     def _toggle_composite(self, on: bool) -> None:
-        if on and self._composite_members() and self.tabs.currentWidget() is not self.psf:
+        if (on and self._composite_members() and self.tabs.currentWidget() is not self.psf
+                and not self._volume_shown()):   # in 3D the 3D tab stays: it lists the channels too
             self.tabs.setCurrentIndex(0)  # the channel table is in the Display tab
+        if on and self.statusBar().currentMessage().startswith("3D shows the selected channel only"):
+            self.statusBar().clearMessage()
         self._update_composite_panel()
         self._render_frame(histogram=False)
         self._update_volume()
         self._update_actions()
 
     def _composite_toggled(self, pos: int, on: bool) -> None:
-        self.comp_on[(self.cur_key[0], pos)] = on
+        """A tick box of the composite table: channel *pos* merged or not (one always stays)."""
+        self._set_composite_channel((self.cur_key[0], pos), on)
+
+    def _set_composite_channel(self, k: tuple, on: bool) -> None:
+        """Channel *k* in the composite or not; the last one stays.  Picking channels switches Composite on."""
+        cands = self._composite_candidates()
+        if k not in cands:
+            return
+        if not on and not any(self.comp_on.get(c, True) for c in cands if c != k):
+            # undo the tick box (later: it may be the table item whose signal this is)
+            QtCore.QTimer.singleShot(0, self._update_composite_panel)
+            self._sync_composite_menu()
+            self.statusBar().showMessage("At least one channel stays in the composite", 4000)
+            return
+        self.comp_on[k] = on
+        self._sync_composite_menu()
+        if not self.a_composite.isChecked():
+            self.a_composite.setChecked(True)   # -> _toggle_composite renders 2D and 3D
+            return
+        self._update_composite_panel()
         self._render_frame(histogram=False)
         self._update_volume()
+
+    def _all_composite_channels(self) -> None:
+        for k in self._composite_candidates():
+            self.comp_on[k] = True
+        self._sync_composite_menu()
+        if not self.a_composite.isChecked():
+            self.a_composite.setChecked(True)
+            return
+        self._update_composite_panel()
+        self._render_frame(histogram=False)
+        self._update_volume()
+
+    def _fill_composite_menu(self) -> None:
+        """The composite channels menu, built when it opens: a tick box per channel of the current size."""
+        menu = self.comp_menu
+        menu.clear()
+        cands = self._composite_candidates()
+        if len(cands) < 2:
+            a = menu.addAction("No other channel of this size")
+            a.setEnabled(False)
+            return
+        head = menu.addAction("Channels in the composite (2D and 3D)")
+        head.setEnabled(False)
+        stacks = self.files[self.cur_key[0]].stacks
+        for k in cands:
+            s = stacks[k[1]]
+            a = _check_action(menu, _stack_label(k[1], s), _swatch(self._member_color(k, cands), 20, 12), k)
+            box = a.property("box")
+            box.setToolTip(_stack_tooltip(s))
+            box.toggled.connect(lambda on, k=k: self._set_composite_channel(k, on))
+        menu.addSeparator()
+        a = menu.addAction(f"All {len(cands)} channels", self._all_composite_channels)
+        a.setData("all")
+        self._sync_composite_menu()
+
+    def _sync_composite_menu(self) -> None:
+        """Tick marks of the composite channels menu as in comp_on; the only ticked channel cannot be unticked."""
+        cands = self._composite_candidates()
+        ticked = [k for k in cands if self.comp_on.get(k, True)]
+        for a in self.comp_menu.actions():
+            k = a.data()
+            box = a.property("box")
+            if isinstance(box, QtWidgets.QCheckBox) and isinstance(k, tuple):
+                with QtCore.QSignalBlocker(box):
+                    box.setChecked(k in ticked)
+                box.setEnabled(ticked != [k])
+                box.setToolTip(_stack_tooltip(self.files[k[0]].stacks[k[1]]) if ticked != [k] else
+                               "The last channel of the composite stays")
+                if k in cands:
+                    box.setIcon(_swatch(self._member_color(k, cands), 20, 12))
+            elif k == "all":
+                a.setEnabled(len(ticked) < len(cands) or not self.a_composite.isChecked())
+
+    def _sync_volume_composite(self) -> None:
+        """The composite line of the 3D tab: how many channels are shown, and how to show the others."""
+        if self.volume_panel is None:
+            return
+        cands = self._composite_candidates()
+        on = self.a_composite.isChecked() and len(cands) > 1
+        shown = sum(self.comp_on.get(k, True) for k in cands) if on else 1
+        name = _stack_label(self.cur_key[1], self.files[self.cur_key[0]].stacks[self.cur_key[1]]) \
+            if self.cur_key is not None and self.cur_key[0] in self.files else ""
+        self.volume_panel.set_composite(len(cands), shown, on, name)
 
     def _composite_color(self, pos: int, color: QtGui.QColor) -> None:
         self.comp_colors[(self.cur_key[0], pos)] = color
@@ -1923,6 +2036,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_volume()
         if on and self._volume_shown() and self.tabs.currentWidget() is not self.volume_scroll:
             self.tabs.setCurrentWidget(self.volume_scroll)
+        n = len(self._composite_candidates())
+        if on and self._volume_shown() and n > 1 and not self.a_composite.isChecked():
+            self.statusBar().showMessage(f"3D shows the selected channel only. Composite (C) shows all {n} channels "
+                                         "of this size together; its arrow ▾ chooses them.", 10000)
         if self.center.currentWidget() is self.viewer_page:
             self._focus_view()
         self._update_actions()
@@ -1957,6 +2074,8 @@ class MainWindow(QtWidgets.QMainWindow):
         panel.cancelRequested.connect(self._cancel_volume_load)
         panel.reloadRequested.connect(self._reload_volume)
         panel.overlayChanged.connect(self._sync_scalebar_action)   # the panel's Scale bar box -> B's check mark
+        panel.set_composite_menu(self.comp_menu, _composite_icon())
+        panel.compositeRequested.connect(self._composite_from_volume)
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1986,6 +2105,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._leave_volume()
             return
         self._enter_volume()
+        self._sync_volume_composite()
         key, keys, index, factor = self._volume_request(s)
         if key in (self._vol_key, self._vol_skip_key):
             if self._vol_loader is not None:  # back to what is shown (or failed): the other load is not needed
@@ -2264,6 +2384,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._volume_info()
         if ok:  # the texture size limit is known now; reloads only if it changes the downsampling
             QtCore.QTimer.singleShot(0, self._update_volume)
+
+    def _composite_from_volume(self, on: bool) -> None:
+        """The buttons of the 3D tab's composite line: all channels of this size together, or the selected one."""
+        if on:
+            self._all_composite_channels()
+        else:
+            self.a_composite.setChecked(False)
 
     def _volume_resolution(self, mode: str) -> None:
         self._vol_resolution = mode
@@ -2779,6 +2906,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_psf.setEnabled(showing_stack or self.a_psf.isChecked())
         self.a_linescan.setEnabled(bool(self.files))
         self.a_composite.setEnabled(showing_stack and len(self._composite_candidates()) > 1)
+        self.comp_menu.menuAction().setEnabled(self.a_composite.isEnabled())
         self.a_calibrate.setEnabled(showing_stack and not busy
                                     and isinstance(self.files[self.cur_key[0]].stacks[self.cur_key[1]], mt.TIFFStack))
         showing_mosaic = showing_stack and isinstance(self.files[self.cur_key[0]].stacks[self.cur_key[1]],

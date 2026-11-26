@@ -602,6 +602,7 @@ class VolumePanel(QtWidgets.QWidget):
     cancelRequested = QtCore.pyqtSignal()         # cancel loading
     reloadRequested = QtCore.pyqtSignal()         # "Reload" after a cancelled or failed load (show_reload)
     overlayChanged = QtCore.pyqtSignal()          # bounding box, scale bar or axes switched in the panel
+    compositeRequested = QtCore.pyqtSignal(bool)  # composite line: True all channels of this size, False selected only
 
     def __init__(self, view, parent=None):
         super().__init__(parent)
@@ -663,6 +664,30 @@ class VolumePanel(QtWidgets.QWidget):
         self.rows_lay = QtWidgets.QVBoxLayout()
         self.rows_lay.setSpacing(1)
         cl.addLayout(self.rows_lay)
+        # composite line (set_composite): which of the file's channels of this size are shown, and how to add them
+        self.comp_frame = QtWidgets.QFrame()
+        self.comp_frame.setObjectName("compositeLine")
+        fl = QtWidgets.QVBoxLayout(self.comp_frame)
+        fl.setContentsMargins(8, 6, 8, 6)
+        fl.setSpacing(5)
+        self.comp_text = QtWidgets.QLabel()
+        self.comp_text.setWordWrap(True)
+        fl.addWidget(self.comp_text)
+        crow = QtWidgets.QHBoxLayout()
+        crow.setSpacing(4)
+        self.comp_all = QtWidgets.QPushButton()
+        self.comp_all.clicked.connect(lambda: self.compositeRequested.emit(not self._comp_on))
+        self.comp_choose = QtWidgets.QPushButton("Choose channels")   # a menu (set_composite_menu)
+        self.comp_choose.setToolTip("Tick the channels of the composite (also the arrow ▾ next to Composite\n"
+                                    "in the toolbar, or View ▸ Composite channels)")
+        crow.addWidget(self.comp_all)
+        crow.addWidget(self.comp_choose)
+        crow.addStretch(1)
+        fl.addLayout(crow)
+        self.comp_frame.hide()
+        self._comp_on = False
+        self._comp_icon: QtGui.QIcon | None = None
+        cl.addWidget(self.comp_frame)
         self.note = QtWidgets.QLabel()
         self.note.setWordWrap(True)
         self.note.setStyleSheet("color: #e0a040;")
@@ -915,6 +940,40 @@ class VolumePanel(QtWidgets.QWidget):
     def show_reload(self, on: bool) -> None:
         """The Reload button (reloadRequested), after a load was cancelled or failed; hidden by the next load."""
         self.reload.setVisible(bool(on))
+
+    def set_composite_menu(self, menu: QtWidgets.QMenu | None, icon: QtGui.QIcon | None = None) -> None:
+        """The menu of *Choose channels* (the viewer's composite channels menu) and the icon of the composite."""
+        self.comp_choose.setMenu(menu)
+        self._comp_icon = icon
+
+    def set_composite(self, total: int, shown: int, on: bool, name: str = "") -> None:
+        """The composite line: *total* channels of the file have the size of the selected stack (*name*);
+        Composite is *on* with *shown* of them, or off (only the selected one).  Hidden below two channels."""
+        self._comp_on = bool(on)
+        if total < 2:
+            self.comp_frame.hide()
+            return
+        icon = self._comp_icon
+        if on:
+            self.comp_text.setText(f"Composite: {shown} of {total} channels, as in 2D.")
+            self.comp_text.setToolTip("")
+            self.comp_text.setStyleSheet(HINT_STYLE)
+            self.comp_all.setText("Selected channel only")
+            self.comp_all.setIcon(QtGui.QIcon())
+            self.comp_all.setToolTip("Composite off: 2D and 3D show the channel selected in the list (C)")
+            self.comp_frame.setStyleSheet("QFrame#compositeLine { border: 1px solid rgba(128, 128, 128, 110); "
+                                          "border-radius: 4px; }")
+        else:
+            self.comp_text.setText(f"<b>1 of {total} channels shown</b>: the one selected in the list. "
+                                   f"Composite (C) shows the {total} channels of this size together.")
+            self.comp_text.setToolTip(f"Shown: {name}" if name else "")
+            self.comp_text.setStyleSheet("")
+            self.comp_all.setText(f"Show all {total} channels")
+            self.comp_all.setIcon(icon or QtGui.QIcon())
+            self.comp_all.setToolTip("Composite on with every channel of this size, in 2D and 3D (C)")
+            self.comp_frame.setStyleSheet("QFrame#compositeLine { background: rgba(40, 110, 190, 55); "
+                                          "border: 1px solid rgba(80, 150, 230, 200); border-radius: 4px; }")
+        self.comp_frame.show()
 
     def set_info(self, text: str | None) -> None:
         """Extra line under the volume info (renderer, errors)."""

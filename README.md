@@ -17,6 +17,9 @@ Bio-Formats rejects these files ("Unknown file format"), so this reads them dire
 
 > **v0.6.0, in development.** Tested so far with ImSpector Pro 7.6.4 files (camera, PMT and resonant
 > scanner timelapse, compressed files, a 3 × 3 mosaic of z-stacks). Other acquisition types may not work yet.
+> What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+
+![The viewer with a two-channel z-stack in the 3D view, both channels merged by Composite](docs/3d_view.png)
 
 ## Features
 
@@ -28,10 +31,12 @@ Bio-Formats rejects these files ("Unknown file format"), so this reads them dire
   (z sweep or timelapse) like any other stack
 - Zoom/pan, scale bar, LUTs, histogram/contrast, frame slider
 - Composite (View ▸ Composite, C): the channels of a file merged as in ImageJ's composite mode, each with its
-  own colour and levels; also for PNG and MP4 export
+  own colour and levels; the arrow ▾ next to *Composite* chooses which channels are merged; also for PNG and
+  MP4 export and in the 3D view
 - 3D view (View ▸ 3D view, 3) of z-stacks and 3D mosaics: interactive volume rendering on the graphics card,
   a Python port of the renderer of the Fiji plugin [3Dscript](https://github.com/bene51/3Dscript); per channel
-  colour or lookup table, min / max, gamma and weight, three rendering algorithms, view presets, PNG snapshots
+  colour or lookup table, min / max, gamma and weight, three rendering algorithms, view presets, PNG snapshots;
+  several channels together with Composite ([how](#several-channels-in-3d))
 - Timelapse playback in real time (the recorded frame intervals, × speed) or at a fixed frame rate
 - All metadata: pixel size, frame timestamps, objective and every ImSpector setting (filter, compare two stacks)
 - Export to OME-TIFF or ImageJ TIFF with physical pixel size and frame times, plus a `metadata.json`
@@ -143,6 +148,13 @@ blue, gray, cyan, magenta, yellow; the colour button picks another). A click on 
 Min / Max and the histogram below act on it; frame and zoom stay. Save view as PNG and Export video write
 the composite; the PSF tab measures the selected channel.
 
+All channels of the same size are merged at first. To leave some out, untick them in the table, or tick the
+ones you want in the menu of the arrow ▾ next to the *Composite* button (also View ▸ Composite channels and
+*Choose channels* in the 3D tab). The menu stays open while you tick; choosing channels there switches
+Composite on, and one channel always stays in. The choice holds for 2D, the exports and the 3D view.
+
+![The composite of two channels in 2D: the Composite button with its arrow, and the channel table](docs/composite_2d.png)
+
 PSF analysis opens as an extra tab. A click on a bead snaps the cross to its centre (brightest pixel nearby,
 refined by the intensity centroid); drag the white circle to fine-tune. The profiles along both arms are
 sampled with cubic splines (bilinear sampling between pixel centres would broaden a PSF by ~2 % at σ = 2 px),
@@ -199,10 +211,32 @@ with MSRFile("mosaic.msr") as msr:
 
 View ▸ 3D view (key 3, or *3D view* in the toolbar) shows the current z-stack or 3D mosaic as a volume. Every
 pixel of the view casts a ray through the stack on the graphics card (orthographic ray casting), a Python port
-of the renderer of the Fiji plugin 3Dscript (see below). While Composite is on, the active channels of the
-composite are shown together; otherwise the stack the 2D view shows. The button stays on while 2D-only stacks
-are shown, and the next z-stack opens in 3D again. Other axes such as time are chosen with the sliders below
-the view as in 2D. The Z slider is off, because all planes are shown.
+of the renderer of the Fiji plugin 3Dscript (see below). While Composite is on, the channels of the
+composite are shown together; otherwise the stack the 2D view shows (see
+[Several channels in 3D](#several-channels-in-3d)). The button stays on while 2D-only stacks are shown, and
+the next z-stack opens in 3D again. Other axes such as time are chosen with the sliders below the view as in
+2D. The Z slider is off, because all planes are shown.
+
+### Several channels in 3D
+
+> [!IMPORTANT]
+> The 3D view shows what the 2D view shows. With Composite off, that is **only the channel selected in the
+> list**, even when the file has more channels. To see several channels in 3D, switch **Composite** on: the
+> toolbar button, View ▸ Composite or the key **C**, before or after switching to 3D, or *Show all N
+> channels* in the 3D tab.
+
+When the file has more channels of the same size, the 3D tab says how many are shown, and the status bar
+says so when 3D is switched on:
+
+![3D view with Composite off: only the selected channel is shown, and the 3D tab offers to show all channels](docs/3d_one_channel.png)
+
+With Composite on, each channel of the composite becomes a channel of the volume, with its composite colour
+and its 2D Min / Max to start with. All channels of the same size are in it at first. The arrow ▾ next to
+*Composite*, View ▸ Composite channels or *Choose channels* in the 3D tab tick which ones are merged; the
+volume reloads with them. *Selected channel only* switches Composite off again. The tick box in front of each
+channel row of the 3D tab hides a channel in 3D without loading the volume again (2D is not affected).
+
+![3D view with Composite on: the channel menu of the Composite button and the channel rows of the 3D tab](docs/3d_composite.png)
 
 Mouse and keys in the view:
 
@@ -215,7 +249,8 @@ The *3D* tab next to *Display*:
 
 - **Channels**: visibility and colour per channel: a colour, or one of the lookup tables Fire, Viridis, HiLo
   and Inverted. A channel starts with its colour in 2D (composite colour or LUT) and its 2D Min / Max. Click a
-  channel to edit its contrast.
+  channel to edit its contrast. Below the channels, when the file has more channels of this size: how many
+  are shown, *Show all N channels* / *Selected channel only* and *Choose channels*.
 - **Contrast**: the histogram of the whole volume with the transfer function. Drag the yellow lines to set
   Min / Max, or drag between them to move the window. Below Min a voxel is black and transparent; towards Max
   it gets its full colour and becomes opaque. Gamma (brightness curve), Weight, and the buttons Auto (0.1–99.9 %
